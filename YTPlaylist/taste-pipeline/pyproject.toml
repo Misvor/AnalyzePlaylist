@@ -16,6 +16,7 @@ dependencies = [
     "httpx",
     "pytest",
     "ruff",
+    "typing_extensions>=4.0",
 ]
 
 [build-system]
