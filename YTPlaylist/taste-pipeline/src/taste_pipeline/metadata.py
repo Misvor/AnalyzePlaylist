@@ -115,9 +115,7 @@ def _to_track_metadata(info: Mapping[str, object]) -> TrackMetadata | None:
     )
 
 
-def fetch_metadata(
-    video_ids: Sequence[str], config: Config, state: StateStore
-) -> list[TrackMetadata]:
+def fetch_metadata(video_ids: Sequence[str], config: Config, state: StateStore) -> list[TrackMetadata]:
     """Fetch full metadata for at most ``config.max_metadata_fetch`` ids.
 
     Input order is feed order (newest first) and is preserved in the result.

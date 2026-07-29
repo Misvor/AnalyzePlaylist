@@ -237,9 +237,7 @@ def test_fetch_metadata_configures_yt_dlp_for_full_readonly_extraction(
     assert "download_archive" not in params
 
 
-def test_metadata_json_round_trip(
-    monkeypatch: pytest.MonkeyPatch, config: Config, state: StateStore
-) -> None:
+def test_metadata_json_round_trip(monkeypatch: pytest.MonkeyPatch, config: Config, state: StateStore) -> None:
     # Given metadata fetched from the recorded fixtures
     _patch_extractor(monkeypatch, _default_fixtures())
     results = fetch_metadata([SONG_ID, TALK_ID], config, state)
