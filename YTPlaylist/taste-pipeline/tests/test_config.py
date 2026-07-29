@@ -24,9 +24,7 @@ def _toml_path(path: Path) -> str:
     return path.as_posix()
 
 
-def _minimal_body(
-    like_library_dir: Path, data_dir: Path, cookie_file: Path
-) -> str:
+def _minimal_body(like_library_dir: Path, data_dir: Path, cookie_file: Path) -> str:
     """A minimal valid config body with only the three required path fields."""
     return (
         f'like_library_dir = "{_toml_path(like_library_dir)}"\n'
@@ -90,8 +88,7 @@ def test_unknown_key_rejected(tmp_path: Path) -> None:
     like_lib.mkdir()
     config_path = _write_config(
         tmp_path,
-        _minimal_body(like_lib, tmp_path / "data", tmp_path / "cookies.txt")
-        + "bogus_key = 42\n",
+        _minimal_body(like_lib, tmp_path / "data", tmp_path / "cookies.txt") + "bogus_key = 42\n",
     )
 
     # When loading
@@ -108,8 +105,7 @@ def test_invalid_type_for_feed_window_days_rejected(tmp_path: Path) -> None:
     like_lib.mkdir()
     config_path = _write_config(
         tmp_path,
-        _minimal_body(like_lib, tmp_path / "data", tmp_path / "cookies.txt")
-        + 'feed_window_days = "seven"\n',
+        _minimal_body(like_lib, tmp_path / "data", tmp_path / "cookies.txt") + 'feed_window_days = "seven"\n',
     )
 
     # When loading (this is the plan's QA failure scenario)
@@ -186,9 +182,7 @@ def test_relative_paths_resolved_against_config_dir(tmp_path: Path) -> None:
     like_lib.mkdir()
     config_path = _write_config(
         tmp_path,
-        'like_library_dir = "./lib"\n'
-        'data_dir = "./data"\n'
-        'cookie_file = "./cookies.txt"\n',
+        'like_library_dir = "./lib"\ndata_dir = "./data"\ncookie_file = "./cookies.txt"\n',
     )
 
     # When loading
@@ -287,9 +281,7 @@ def test_missing_config_file_raises_config_error(tmp_path: Path) -> None:
     assert "not found" in str(exc_info.value).lower()
 
 
-def test_env_fallback_uses_taste_pipeline_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_fallback_uses_taste_pipeline_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Given an env var pointing to a valid config
     like_lib = tmp_path / "lib"
     like_lib.mkdir()
@@ -304,9 +296,7 @@ def test_env_fallback_uses_taste_pipeline_config(
     assert cfg.like_library_dir == like_lib.resolve()
 
 
-def test_env_fallback_disabled_skips_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_fallback_disabled_skips_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Given an env var that is set but env_fallback=False
     like_lib = tmp_path / "lib"
     like_lib.mkdir()

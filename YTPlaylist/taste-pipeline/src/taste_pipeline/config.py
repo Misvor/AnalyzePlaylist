@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Final, cast
 
 _DATA_SUBDIRS: Final[tuple[str, ...]] = (
-    "inbox", "keep", "review", "skip", "dislike", "index", "runs",
+    "inbox",
+    "keep",
+    "review",
+    "skip",
+    "dislike",
+    "index",
+    "runs",
 )
 _DOWNLOAD_ARCHIVE_NAME: Final[str] = "yt-dlp-archive.txt"
 _WITH_MIN_BOUND: Final[int] = 1
@@ -90,9 +96,7 @@ def _coerce_str(name: str, value: object, errors: list[str]) -> str | None:
     return value
 
 
-def _coerce_path(
-    name: str, value: object, base_dir: Path, errors: list[str]
-) -> Path | None:
+def _coerce_path(name: str, value: object, base_dir: Path, errors: list[str]) -> Path | None:
     """Validate a TOML value as a non-empty string path, then resolve it against ``base_dir``."""
     text = _coerce_str(name, value, errors)
     if text is None:
@@ -160,9 +164,7 @@ def _coerce_optional_float(
     return _coerce_float(name, value, errors, minimum=minimum, maximum=maximum)
 
 
-def _coerce_field(
-    name: str, value: object, spec: tuple, base_dir: Path, errors: list[str]
-) -> object | None:
+def _coerce_field(name: str, value: object, spec: tuple, base_dir: Path, errors: list[str]) -> object | None:
     """Dispatch one field by its spec. Returns the coerced value or ``None`` (error appended)."""
     kind = spec[0]
     if kind == "str":
@@ -276,8 +278,6 @@ def load_config(
         message = f"invalid TOML in {config_path}: {exc}"
         raise ConfigError(message) from exc
     if not isinstance(raw, dict):
-        message = (
-            f"invalid config {config_path}: top-level must be a table, got {_typename(raw)}"
-        )
+        message = f"invalid config {config_path}: top-level must be a table, got {_typename(raw)}"
         raise ConfigError(message)
     return _validate(raw, config_path)
