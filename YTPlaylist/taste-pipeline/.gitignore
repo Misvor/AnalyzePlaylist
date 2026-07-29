@@ -1,0 +1,28 @@
+# Virtual environment (uv-managed, never commit)
+.venv/
+
+# Build / packaging artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.basedpyright/
+
+# Pipeline outputs (local state, never commit)
+var/
+data/
+runs/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/

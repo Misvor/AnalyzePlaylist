@@ -1,0 +1,108 @@
+[project]
+name = "taste-pipeline"
+version = "0.1.0"
+description = "YouTube Music taste pipeline: download playlist audio, embed tracks, cluster taste profiles, and serve them over HTTP."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "yt-dlp>=2026.3.3",
+    "torch>=2.2",
+    "transformers>=4.45",
+    "numpy",
+    "scikit-learn",
+    "librosa",
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "pytest",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taste_pipeline"]
+
+# ─────────────────────────────────────────────────────────────────
+# basedpyright - typeCheckingMode = "all" sets every report flag to error
+# ─────────────────────────────────────────────────────────────────
+[tool.basedpyright]
+typeCheckingMode = "all"
+pythonVersion = "3.11"
+pythonPlatform = "All"
+include = ["src", "tests"]
+exclude = ["**/__pycache__", "**/.venv", "**/build", "**/dist"]
+
+# ─────────────────────────────────────────────────────────────────
+# ruff - select = ["ALL"] enables every rule; ignore only formatter
+# conflicts and project-level noise.
+# ─────────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812", # missing trailing comma (conflicts with ruff format)
+    "ISC001", # implicit string concat (conflicts with ruff format)
+    "D203",   # mutually exclusive with D211
+    "D213",   # mutually exclusive with D212
+    "CPY001", # no per-file copyright header
+    "FBT001", # boolean positional arg in def
+    "FBT002", # boolean positional default in def
+    "TD002",  # missing TODO author
+    "TD003",  # missing TODO link
+    "FIX002", # TODOs are allowed
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",    # assert is the entire point of pytest
+    "ARG",     # fixtures appear as unused args
+    "PLR2004", # magic numbers in test data
+    "SLF001",  # tests may access private members
+    "D",       # test names are the docs
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-bugbear]
+# fastapi relies on call-as-default for parameter metadata
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.File",
+    "fastapi.Form",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+# ─────────────────────────────────────────────────────────────────
+# pytest
+# ─────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-config",
+    "--strict-markers",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
