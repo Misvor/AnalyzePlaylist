@@ -18,6 +18,12 @@ var/
 data/
 runs/
 
+# Placeholders shipped with config.example.toml (smoke-test fixtures,
+# never commit; users replace these paths in their real config.toml).
+example_like_library/
+example_data/
+example_cookies.txt
+
 # OS artifacts
 .DS_Store
 Thumbs.db

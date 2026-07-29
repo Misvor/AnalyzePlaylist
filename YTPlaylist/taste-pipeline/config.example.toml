@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────
+# taste-pipeline configuration
+# ─────────────────────────────────────────────────────────────────
+# Copy this file to `config.toml` and edit the path keys for your machine.
+# Relative paths are resolved against this file's directory.
+# Every key below is shown for reference; the active values are the
+# uncommented ones. Required keys are flagged REQUIRED.
+# ─────────────────────────────────────────────────────────────────
+
+# REQUIRED: directory containing your existing liked music. The pipeline
+# never writes into this folder — it is opened read-only.
+like_library_dir = "./example_like_library"
+
+# REQUIRED: working directory for downloads, indexes, triage, and state.
+# Created (with subdirs inbox/ keep/ review/ skip/ dislike/ index/ runs/)
+# the first time the pipeline loads if it does not exist.
+data_dir = "./example_data"
+
+# REQUIRED: path to a Netscape-format cookies.txt exported from a logged-in
+# YouTube session. Existence is NOT checked here; the `doctor` command
+# verifies it before a pipeline run. See docs/cookies.md for the export
+# runbook.
+cookie_file = "./example_cookies.txt"
+
+# yt-dlp's cross-week re-download guard. Defaults to
+# <data_dir>/yt-dlp-archive.txt when omitted.
+# download_archive = "./example_data/yt-dlp-archive.txt"
+
+# CLAP model identifier (Hugging Face). Must remain transformers-compatible.
+# model_name = "laion/larger_clap_music_and_speech"
+
+# Subscriptions feed window in days. Entries with `timestamp` older than
+# (now - feed_window_days) are dropped client-side during pass A.
+# feed_window_days = 7
+
+# Hard cap on items pulled from the flat subscriptions feed.
+# max_feed_items = 500
+
+# Hard cap on per-video full-metadata fetches per pipeline run.
+# max_metadata_fetch = 150
+
+# CLAP audio chunking. Tracks longer than `chunk_seconds` are split into
+# non-overlapping windows; trailing windows shorter than `min_chunk_seconds`
+# are dropped.
+# chunk_seconds = 10.0
+# min_chunk_seconds = 3.0
+
+# Target sample rate for ffmpeg decode (CLAP expects 48 kHz).
+# sample_rate = 48000
+
+# Scoring thresholds. When `null`, calibrated values are loaded from
+# <data_dir>/index/thresholds.json (produced by `calibrate`). Otherwise
+# these overrides win. Both must lie in [0.0, 1.0] and satisfy
+# skip_threshold < keep_threshold.
+# keep_threshold = null
+# skip_threshold = null
+
+# Dislike count at which the scorer switches from centroid mode to
+# LogisticRegression (class_weight='balanced', C=1.0, max_iter=1000).
+# min_dislikes_for_classifier = 30
+
+# Local web UI bind address and port. Loopback only by design — no auth,
+# single-user. Expose to a LAN only if you understand the implications.
+# web_host = "127.0.0.1"
+# web_port = 8741
