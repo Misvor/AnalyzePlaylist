@@ -1,0 +1,17 @@
+{
+  "id": "talk0000001",
+  "title": "The Weekly Digest - Episode 42: Compilers",
+  "uploader": "The Weekly Digest",
+  "uploader_id": "@weeklydigest",
+  "channel_id": "UC3333333333333333333333",
+  "upload_date": "20240118",
+  "timestamp": 1705536000,
+  "categories": ["People & Blogs"],
+  "duration": 3600.5,
+  "description": "This week we talk about compilers, parsers, and why your build is slow.\n\n00:00 Intro\n12:34 Parsers\n45:00 Optimizers",
+  "track": null,
+  "artist": null,
+  "album": null,
+  "thumbnail": "https://i.ytimg.com/vi/talk0000001/hqdefault.jpg",
+  "webpage_url": "https://www.youtube.com/watch?v=talk0000001"
+}
