@@ -1,0 +1,23 @@
+# Build outputs
+bin/
+obj/
+out/
+*.user
+*.suo
+
+# IDE
+.idea/
+.vs/
+
+# Benchmark artifacts
+BenchmarkDotNet.Artifacts/
+
+# Vendored libs (template defaults)
+**/wwwroot/lib/
+
+# Plan artifacts & runtime data
+.omo/
+YTPlaylist/taste-pipeline/var/
+YTPlaylist/taste-pipeline/data/
+YTPlaylist/taste-pipeline/runs/
+YTPlaylist/taste-pipeline/*.egg-info/
