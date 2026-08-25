@@ -5,6 +5,10 @@ The ``seen`` table records every video id the pipeline has listed, together
 with the stage it reached (``listed`` -> ``metadata`` -> ``downloaded`` ...),
 which makes re-runs idempotent: pass A drops ids already present here instead
 of relying on yt-dlp's ``--download-archive`` (read-only during listing).
+
+The ``downloads`` table records pass-C results: for every downloaded video the
+FLAC's path on disk and the stage it reached, so later passes (triage, web UI)
+can locate the audio without re-walking the inbox.
 """
 
 import sqlite3
@@ -20,7 +24,18 @@ CREATE TABLE IF NOT EXISTS seen (
     stage TEXT NOT NULL
 )
 """
+_CREATE_DOWNLOADS: Final[str] = """
+CREATE TABLE IF NOT EXISTS downloads (
+    video_id TEXT PRIMARY KEY,
+    stage TEXT NOT NULL,
+    audio_path TEXT NOT NULL,
+    downloaded_at TEXT NOT NULL
+)
+"""
 _INSERT_SEEN: Final[str] = "INSERT OR IGNORE INTO seen (video_id, first_seen, stage) VALUES (?, ?, ?)"
+_INSERT_DOWNLOAD: Final[str] = (
+    "INSERT OR REPLACE INTO downloads (video_id, stage, audio_path, downloaded_at) VALUES (?, ?, ?, ?)"
+)
 _SELECT_SEEN: Final[str] = "SELECT 1 FROM seen WHERE video_id = ?"
 
 
@@ -35,9 +50,10 @@ class StateStore:
         self.create_tables()
 
     def create_tables(self) -> None:
-        """Create the ``seen`` table when missing (safe to call repeatedly)."""
+        """Create the ``seen`` and ``downloads`` tables when missing (safe to call repeatedly)."""
         with self._conn:
             _ = self._conn.execute(_CREATE_SEEN)
+            _ = self._conn.execute(_CREATE_DOWNLOADS)
 
     def record_seen(self, video_id: str, stage: str) -> bool:
         """Insert ``video_id`` with ``stage`` and the current UTC time; existing rows are untouched.
@@ -48,6 +64,20 @@ class StateStore:
         first_seen = datetime.now(UTC).isoformat()
         with self._conn:
             cursor = self._conn.execute(_INSERT_SEEN, (video_id, first_seen, stage))
+        return cursor.rowcount > 0
+
+    def record_download(self, video_id: str, audio_path: Path, stage: str = "downloaded") -> bool:
+        """Record ``video_id`` as downloaded to ``audio_path`` with the current UTC time.
+
+        Unlike :meth:`record_seen` this uses REPLACE semantics: a re-download of
+        the same id updates the row, so it always points at the current file.
+
+        Returns:
+            True when the row was written.
+        """
+        downloaded_at = datetime.now(UTC).isoformat()
+        with self._conn:
+            cursor = self._conn.execute(_INSERT_DOWNLOAD, (video_id, stage, str(audio_path), downloaded_at))
         return cursor.rowcount > 0
 
     def already_seen(self, video_id: str) -> bool:
