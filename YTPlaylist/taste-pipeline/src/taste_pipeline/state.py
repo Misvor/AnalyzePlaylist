@@ -14,7 +14,7 @@ can locate the audio without re-walking the inbox.
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 _DB_FILENAME: Final[str] = "state.db"
 _CREATE_SEEN: Final[str] = """
@@ -85,6 +85,25 @@ class StateStore:
         cursor = self._conn.execute(_SELECT_SEEN, (video_id,))
         return cursor.fetchone() is not None
 
+    def get_download_record(self, video_id: str) -> tuple[str, str] | None:
+        """Return ``(stage, audio_path)`` for ``video_id``'s downloads row, or ``None`` when absent.
+
+        The audio_path is the string as stored in the table (an absolute
+        path that may have moved since the row was written); callers
+        performing a triage action should treat it as the canonical
+        current location (REPLACE semantics on :meth:`record_download`
+        keep the row in sync with the file's actual location on disk).
+        """
+        cursor = self._conn.execute(
+            "SELECT stage, audio_path FROM downloads WHERE video_id = ?",
+            (video_id,),
+        )
+        row = cast("tuple[str, str] | None", cursor.fetchone())
+        if row is None:
+            return None
+        stage, audio_path = row
+        return stage, audio_path
+
     def state_counts(self) -> dict[str, dict[str, int]]:
         """Return row counts per stage for both the seen and downloads tables.
 
@@ -94,9 +113,11 @@ class StateStore:
         """
         seen_cursor = self._conn.execute("SELECT stage, COUNT(*) FROM seen GROUP BY stage")
         downloads_cursor = self._conn.execute("SELECT stage, COUNT(*) FROM downloads GROUP BY stage")
+        seen_rows = cast("list[tuple[str, int]]", seen_cursor.fetchall())
+        downloads_rows = cast("list[tuple[str, int]]", downloads_cursor.fetchall())
         return {
-            "seen": {str(stage): int(count) for stage, count in seen_cursor.fetchall()},
-            "downloads": {str(stage): int(count) for stage, count in downloads_cursor.fetchall()},
+            "seen": dict(seen_rows),
+            "downloads": dict(downloads_rows),
         }
 
     def close(self) -> None:

@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from taste_pipeline.state import StateStore
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def test_state_counts_empty_state_returns_empty_subdicts(tmp_path: Path) -> None:
@@ -89,3 +86,57 @@ def test_state_counts_does_not_count_duplicate_seen_inserts(tmp_path: Path) -> N
 
     # Then duplicates collapse to a single row (primary key enforcement)
     assert counts["seen"] == {"listed": 1}
+
+
+def test_get_download_record_returns_none_when_row_absent(tmp_path: Path) -> None:
+    # Given a fresh StateStore with no download rows
+    store = StateStore(tmp_path)
+    try:
+        # When asking for a video_id that was never recorded
+        result = store.get_download_record("never_recorded")
+    finally:
+        store.close()
+
+    # Then None is returned (the caller treats this as a 404 case)
+    assert result is None
+
+
+def test_get_download_record_returns_stage_and_audio_path(tmp_path: Path) -> None:
+    # Given a StateStore with one downloaded row at a known path
+    store = StateStore(tmp_path)
+    try:
+        audio_path = tmp_path / "song.flac"
+        _ = store.record_download("vid1", audio_path=audio_path, stage="kept")
+    finally:
+        pass
+
+    # When asking for that video_id
+    result = store.get_download_record("vid1")
+    store.close()
+
+    # Then the (stage, audio_path) tuple round-trips through the table
+    assert result is not None
+    stage, stored_path = result
+    assert stage == "kept"
+    assert Path(stored_path) == audio_path
+
+
+def test_get_download_record_returns_latest_path_after_replace(tmp_path: Path) -> None:
+    # Given a video_id whose downloads row was REPLACEd with a new path (triage moved the file)
+    store = StateStore(tmp_path)
+    try:
+        original_path = tmp_path / "inbox" / "old.flac"
+        new_path = tmp_path / "keep" / "new.flac"
+        _ = store.record_download("vid1", audio_path=original_path)
+        _ = store.record_download("vid1", audio_path=new_path, stage="kept")
+    finally:
+        pass
+
+    # When asking for that video_id
+    result = store.get_download_record("vid1")
+    store.close()
+
+    # Then the returned audio_path is the latest one (REPLACE semantics)
+    assert result is not None
+    _stage, stored_path = result
+    assert Path(stored_path) == new_path

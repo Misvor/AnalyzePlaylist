@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}Triage — Taste Pipeline{% endblock %}
+
+{% block content %}
+  <h1>Triage</h1>
+
+  {% if not items %}
+    <p id="empty-inbox">The inbox is empty. Run Pass C — Download to add tracks.</p>
+  {% else %}
+    <table id="inbox-table">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Title</th>
+          <th>Uploader</th>
+          <th>Audio</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="inbox-body">
+        {% for item in items %}
+          <tr data-video-id="{{ item.video_id or '' }}">
+            <td class="filename">{{ item.filename }}</td>
+            <td class="title">{{ item.title or "" }}</td>
+            <td class="uploader">{{ item.uploader or "" }}</td>
+            <td class="audio">
+              <audio controls preload="none" src="/audio/inbox/{{ item.filename }}"></audio>
+            </td>
+            <td class="actions">
+              <button class="action-keep"
+                      hx-post="/api/triage/{{ item.video_id }}"
+                      hx-vals='{"action": "keep"}'
+                      hx-target="closest tr"
+                      hx-swap="outerHTML">Keep</button>
+              <button class="action-review"
+                      hx-post="/api/triage/{{ item.video_id }}"
+                      hx-vals='{"action": "review"}'
+                      hx-target="closest tr"
+                      hx-swap="outerHTML">Review</button>
+              <button class="action-skip"
+                      hx-post="/api/triage/{{ item.video_id }}"
+                      hx-vals='{"action": "skip"}'
+                      hx-target="closest tr"
+                      hx-swap="outerHTML">Skip</button>
+              <button class="action-dislike"
+                      hx-post="/api/triage/{{ item.video_id }}"
+                      hx-vals='{"action": "dislike"}'
+                      hx-target="closest tr"
+                      hx-swap="outerHTML">Dislike</button>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endblock %}
