@@ -20,6 +20,7 @@ from taste_pipeline.web.jobs import JobRunner
 from taste_pipeline.web.routes_index import build_index_status
 from taste_pipeline.web.routes_index import router as index_router
 from taste_pipeline.web.routes_jobs import router as jobs_router
+from taste_pipeline.web.routes_settings import router as settings_router
 from taste_pipeline.web.routes_triage import router as triage_router
 
 if TYPE_CHECKING:
@@ -55,6 +56,7 @@ def create_app(config: Config) -> FastAPI:
     app.include_router(api_router)
     app.include_router(index_router)
     app.include_router(jobs_router)
+    app.include_router(settings_router)
     app.include_router(triage_router)
     app.state.runner = JobRunner(config.data_dir)
     app.state.templates = templates

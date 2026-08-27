@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}Settings — Taste Pipeline{% endblock %}
+
+{% block content %}
+  <h1>Settings</h1>
+
+  <p id="settings-readonly-note">
+    Read-only display. Edit <code>config.toml</code> and restart to change settings.
+  </p>
+
+  <table id="settings-table">
+    <thead>
+      <tr>
+        <th>Field</th>
+        <th>Value</th>
+      </tr>
+    </thead>
+    <tbody id="settings-body">
+      {% for row in rows %}
+        <tr class="settings-row" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
+          <td class="field-name">{{ row.name }}</td>
+          <td class="field-value field-value-{{ row.kind }}">
+            {% if row.kind == "path" %}<code class="path-value">{{ row.value }}</code>
+            {% elif row.kind == "none" %}<em class="none-value">{{ row.value }}</em>
+            {% else %}{{ row.value }}{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}
