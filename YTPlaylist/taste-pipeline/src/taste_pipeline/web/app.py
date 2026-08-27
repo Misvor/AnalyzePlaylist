@@ -44,7 +44,7 @@ def create_app(config: Config) -> FastAPI:
 
     async def _index(request: Request) -> Response:
         """Render the base HTML shell."""
-        return templates.TemplateResponse(request, "base.html")
+        return templates.TemplateResponse(request, "dashboard.html")
 
     _ = app.get("/")(_index)
     app.include_router(api_router)

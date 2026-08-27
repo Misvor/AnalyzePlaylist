@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — Taste Pipeline{% endblock %}
+
+{% block content %}
+  <h1>Dashboard</h1>
+
+  <div id="run-buttons">
+    <button id="run-feed" class="run-button"
+            hx-post="/api/jobs" hx-vals='{"kind":"feed"}'
+            hx-target="#run-history-body" hx-swap="afterbegin">Pass A — Feed</button>
+    <button id="run-metadata" class="run-button"
+            hx-post="/api/jobs" hx-vals='{"kind":"metadata"}'
+            hx-target="#run-history-body" hx-swap="afterbegin">Pass B — Metadata</button>
+    <button id="run-download" class="run-button"
+            hx-post="/api/jobs" hx-vals='{"kind":"download"}'
+            hx-target="#run-history-body" hx-swap="afterbegin">Pass C — Download</button>
+    <button id="run-index" class="run-button"
+            hx-post="/api/jobs" hx-vals='{"kind":"index"}'
+            hx-target="#run-history-body" hx-swap="afterbegin">Build Index</button>
+  </div>
+
+  <div id="concurrent-error" class="badge" data-status="failed" hidden></div>
+
+  <h2>Run history</h2>
+  <table id="run-history">
+    <thead>
+      <tr>
+        <th>kind</th>
+        <th>status</th>
+        <th>progress</th>
+        <th>started</th>
+        <th>finished</th>
+        <th>error</th>
+      </tr>
+    </thead>
+    <tbody id="run-history-body">
+    </tbody>
+  </table>
+
+  <script>
+    // Dashboard wiring: live SSE progress for running jobs + visible
+    // concurrent-same-kind rejection handling. The page is intentionally
+    // empty on load; rows are added when the user clicks a run button.
+    // attachJobStreamers() is re-run after every htmx swap so freshly
+    // inserted rows are wired to EventSource.
+    (function () {
+      function attachJobStreamers() {
+        var rows = document.querySelectorAll('#run-history-body tr[data-job-id]');
+        for (var i = 0; i < rows.length; i++) {
+          var row = rows[i];
+          if (row.dataset.streaming === '1') continue;
+          row.dataset.streaming = '1';
+          var jobId = row.dataset.jobId;
+          var es = new EventSource('/api/jobs/' + jobId + '/events');
+          es.addEventListener('progress', function (evt) {
+            try {
+              var data = JSON.parse(evt.data);
+              var bar = row.querySelector('.progress-bar > .fill');
+              if (bar) bar.style.width = (data.progress * 100).toFixed(1) + '%';
+            } catch (e) { /* malformed event payload: ignore */ }
+          });
+          es.addEventListener('done', function () {
+            es.close();
+          });
+        }
+      }
+
+      // Concurrent same-kind rejection (POST /api/jobs returns 422 when a
+      // job of the same kind is already active). htmx 2.x fires
+      // htmx:responseError on any non-2xx response from an hx-post;
+      // the dashboard surfaces the failure in #concurrent-error instead
+      // of failing silently.
+      document.body.addEventListener('htmx:responseError', function (evt) {
+        var xhr = evt && evt.detail && evt.detail.xhr;
+        var status = xhr ? xhr.status : 0;
+        if (status === 422 || status === 409) {
+          var errEl = document.getElementById('concurrent-error');
+          if (errEl) {
+            errEl.textContent = 'Rejected: another job of this kind is already running.';
+            errEl.hidden = false;
+          }
+        }
+      });
+
+      // Re-wire SSE for any rows htmx just swapped into the table.
+      document.body.addEventListener('htmx:afterSwap', function () {
+        attachJobStreamers();
+      });
+
+      // Initial pass: the page starts with an empty tbody, so this is a
+      // no-op on first load. The htmx:afterSwap handler covers every
+      // subsequent row insertion.
+      attachJobStreamers();
+    })();
+  </script>
+{% endblock %}
