@@ -85,6 +85,20 @@ class StateStore:
         cursor = self._conn.execute(_SELECT_SEEN, (video_id,))
         return cursor.fetchone() is not None
 
+    def state_counts(self) -> dict[str, dict[str, int]]:
+        """Return row counts per stage for both the seen and downloads tables.
+
+        Only stages with at least one row appear in the inner dict; an empty
+        table yields an empty inner dict (e.g. ``{"seen": {}, "downloads": {}}``
+        for a freshly-opened store).
+        """
+        seen_cursor = self._conn.execute("SELECT stage, COUNT(*) FROM seen GROUP BY stage")
+        downloads_cursor = self._conn.execute("SELECT stage, COUNT(*) FROM downloads GROUP BY stage")
+        return {
+            "seen": {str(stage): int(count) for stage, count in seen_cursor.fetchall()},
+            "downloads": {str(stage): int(count) for stage, count in downloads_cursor.fetchall()},
+        }
+
     def close(self) -> None:
         """Close the underlying connection (Windows releases the file lock only on close)."""
         self._conn.close()

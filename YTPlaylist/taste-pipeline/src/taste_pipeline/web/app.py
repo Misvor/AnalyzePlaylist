@@ -15,6 +15,8 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from taste_pipeline.web.api import router as api_router
+
 if TYPE_CHECKING:
     from fastapi.responses import Response
 
@@ -43,4 +45,5 @@ def create_app(config: Config) -> FastAPI:
         return templates.TemplateResponse(request, "base.html")
 
     _ = app.get("/")(_index)
+    app.include_router(api_router)
     return app
