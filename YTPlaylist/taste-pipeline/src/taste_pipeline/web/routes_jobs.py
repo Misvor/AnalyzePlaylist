@@ -39,6 +39,7 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
+    from taste_pipeline.config import Config
     from taste_pipeline.web.jobs import Job, JobRunner
 
 JobKind = Literal["feed", "metadata", "download", "index"]
@@ -83,6 +84,12 @@ def _sse(payload: dict[str, object]) -> str:
 async def create_job(request: Request, body: JobCreateRequest) -> dict[str, object]:
     """Submit a new job of the given ``kind``; returns the job JSON with status 201.
 
+    On the first request, lazily populates :data:`JOB_FACTORIES` with the
+    real pipeline factories bound to the app's ``config`` and a fresh
+    :class:`StateStore` over ``config.data_dir``. Tests register fakes
+    directly into :data:`JOB_FACTORIES` (the dict stays non-empty, the
+    ``if not JOB_FACTORIES`` guard short-circuits, the test's fake wins).
+
     Raises:
         HTTPException: 422 if ``body.kind`` is not in :data:`JOB_FACTORIES`.
             (Pydantic Literal already rejects unknown string values with 422
@@ -90,7 +97,14 @@ async def create_job(request: Request, body: JobCreateRequest) -> dict[str, obje
             where a kind is in the Literal but has no registered factory.)
     """
     app = cast("FastAPI", request.app)
+    config = cast("Config", app.state.config)
     runner = cast("JobRunner", app.state.runner)
+    if not JOB_FACTORIES:
+        from taste_pipeline.state import StateStore  # noqa: PLC0415 -- lazy construction per app
+        from taste_pipeline.web.job_factories import register_factories  # noqa: PLC0415 -- direct submodule
+
+        state = StateStore(config.data_dir)
+        register_factories(JOB_FACTORIES, config, state)
     factory = JOB_FACTORIES.get(body.kind)
     if factory is None:  # pragma: no cover -- defensive guard against unregistered Literal members
         raise HTTPException(
