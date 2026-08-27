@@ -5,6 +5,15 @@
 {% block content %}
   <h1>Dashboard</h1>
 
+  <div id="index-status-panel" class="index-status">
+    <span class="index-status-label">Library index:</span>
+    <span class="index-status-count">Indexed: {{ index_status.count }} tracks</span>
+    <span class="index-status-sep">|</span>
+    <span class="index-status-scan">Last scan: {{ index_status.last_scan or "never" }}</span>
+    <span class="index-status-sep">|</span>
+    <span class="index-status-lib">Like-library: {{ index_status.like_library_track_count }} files ({{ index_status.like_library_path }})</span>
+  </div>
+
   <div id="run-buttons">
     <button id="run-feed" class="run-button"
             hx-post="/api/jobs" hx-vals='{"kind":"feed"}'

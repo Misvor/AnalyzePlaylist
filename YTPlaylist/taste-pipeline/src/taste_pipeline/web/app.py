@@ -9,7 +9,7 @@ this package directory, so the app works regardless of the process cwd.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +17,8 @@ from fastapi.templating import Jinja2Templates
 
 from taste_pipeline.web.api import router as api_router
 from taste_pipeline.web.jobs import JobRunner
+from taste_pipeline.web.routes_index import build_index_status
+from taste_pipeline.web.routes_index import router as index_router
 from taste_pipeline.web.routes_jobs import router as jobs_router
 from taste_pipeline.web.routes_triage import router as triage_router
 
@@ -44,11 +46,14 @@ def create_app(config: Config) -> FastAPI:
     templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 
     async def _index(request: Request) -> Response:
-        """Render the base HTML shell."""
-        return templates.TemplateResponse(request, "dashboard.html")
+        """Render the dashboard with the current library index status panel."""
+        config = cast("Config", app.state.config)
+        index_status = build_index_status(config)
+        return templates.TemplateResponse(request, "dashboard.html", {"index_status": index_status})
 
     _ = app.get("/")(_index)
     app.include_router(api_router)
+    app.include_router(index_router)
     app.include_router(jobs_router)
     app.include_router(triage_router)
     app.state.runner = JobRunner(config.data_dir)
