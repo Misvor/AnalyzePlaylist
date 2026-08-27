@@ -21,6 +21,15 @@ dependencies = [
     "typing_extensions>=4.0",
 ]
 
+# ─────────────────────────────────────────────────────────────────
+# Dev-only test tooling (PEP 735 dependency groups).
+# Keep this OUT of [project].dependencies — these do not ship at runtime.
+# ─────────────────────────────────────────────────────────────────
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=0.24",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -71,6 +80,7 @@ unfixable = []
     "PLR2004", # magic numbers in test data
     "SLF001",  # tests may access private members
     "D",       # test names are the docs
+    "EM101",   # literal exception messages are the entire point of failure-path tests
 ]
 
 [tool.ruff.lint.pydocstyle]
