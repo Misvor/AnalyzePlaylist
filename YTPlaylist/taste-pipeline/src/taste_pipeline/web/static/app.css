@@ -1,6 +1,207 @@
-/* Taste Pipeline web UI — placeholder stylesheet (the real shell lands with the htmx todo). */
+/* Taste Pipeline web UI — desktop-app aesthetic (youtube-dl-gui inspired).
+ *
+ * Design intent: compact controls, system fonts, subtle 1px borders, flat
+ * buttons, table rows with cell borders, and per-row progress bars. NOT a
+ * card-heavy modern web look. Reference: MrS0m30n3/youtube-dl-gui (wxPython).
+ */
 
+/* ── Reset / sane defaults ─────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
 body {
   margin: 0;
+  padding: 0;
+}
+
+body {
   font-family: system-ui, "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #222;
+  background: #f5f5f5;
+}
+
+/* ── Top action bar ────────────────────────────────────────────────── */
+#action-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #ccc;
+  background: #eaeaea;
+}
+
+#action-bar #app-name {
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+/* ── Main nav row ──────────────────────────────────────────────────── */
+#main-nav {
+  display: flex;
+  gap: 0;
+  padding: 0 8px;
+  border-bottom: 1px solid #ccc;
+  background: #ddd;
+}
+
+#main-nav a {
+  display: inline-block;
+  padding: 4px 12px;
+  color: #222;
+  text-decoration: none;
+  border-right: 1px solid #ccc;
+}
+
+#main-nav a:hover {
+  background: #eaeaea;
+}
+
+/* ── Main content block ────────────────────────────────────────────── */
+#content {
+  padding: 8px;
+  /* Leave room for the fixed status bar at the bottom. */
+  padding-bottom: 28px;
+}
+
+#content h1,
+#content h2,
+#content h3 {
+  margin: 4px 0 8px 0;
+  font-weight: 600;
+}
+
+/* ── Bottom status bar ─────────────────────────────────────────────── */
+#status-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 4px 8px;
+  border-top: 1px solid #ccc;
+  background: #eaeaea;
+  font-size: 12px;
+  color: #444;
+}
+
+/* ── Flat buttons (no shadow, no gradient) ─────────────────────────── */
+button,
+input[type="button"],
+input[type="submit"] {
+  font-family: inherit;
+  font-size: inherit;
+  padding: 2px 10px;
+  background: #f0f0f0;
+  border: 1px solid #999;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+button:hover,
+input[type="button"]:hover,
+input[type="submit"]:hover {
+  background: #e6e6e6;
+}
+
+button:disabled,
+input[type="button"]:disabled,
+input[type="submit"]:disabled {
+  color: #888;
+  background: #f5f5f5;
+  cursor: default;
+}
+
+/* ── Inputs ────────────────────────────────────────────────────────── */
+input[type="text"],
+input[type="url"],
+input[type="number"],
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  padding: 2px 6px;
+  background: #fff;
+  border: 1px solid #999;
+  border-radius: 0;
+}
+
+/* ── Tables ────────────────────────────────────────────────────────── */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  background: #fff;
+}
+
+th,
+td {
+  border: 1px solid #ddd;
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: #eaeaea;
+  font-weight: 600;
+}
+
+tr:nth-child(even) td {
+  background: #fafafa;
+}
+
+/* ── Per-row progress bars ─────────────────────────────────────────── */
+.progress-bar {
+  position: relative;
+  width: 100%;
+  height: 14px;
+  border: 1px solid #999;
+  background: #fff;
+  overflow: hidden;
+}
+
+.progress-bar > .fill {
+  display: block;
+  height: 100%;
+  background: #5a8;
+  /* Width is set inline by the row template (style="width: 50%;"). */
+}
+
+.progress-bar[data-status="failed"] > .fill {
+  background: #c44;
+}
+
+.progress-bar[data-status="cancelled"] > .fill {
+  background: #999;
+}
+
+/* ── Status badges (used in run-history rows) ──────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid #999;
+  background: #f0f0f0;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.badge[data-status="running"],
+.badge[data-status="queued"] {
+  background: #fea;
+}
+
+.badge[data-status="succeeded"] {
+  background: #cfc;
+}
+
+.badge[data-status="failed"] {
+  background: #fcc;
+}
+
+.badge[data-status="cancelled"] {
+  background: #ddd;
 }

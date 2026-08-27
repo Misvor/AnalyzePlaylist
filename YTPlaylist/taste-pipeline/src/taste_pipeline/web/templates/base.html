@@ -3,12 +3,24 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Taste Pipeline</title>
+    <title>{% block title %}Taste Pipeline{% endblock %}</title>
     <link rel="stylesheet" href="/static/app.css" />
+    <script src="/static/vendor/htmx.min.js" defer></script>
   </head>
   <body>
-    <main id="content">
-      <h1>Taste Pipeline</h1>
-    </main>
+    <header id="action-bar">
+      <span id="app-name">Taste Pipeline</span>
+      {% block action_bar %}{% endblock %}
+    </header>
+    <nav id="main-nav">
+      <a href="#" id="nav-dashboard">Dashboard</a>
+      <a href="#" id="nav-triage">Triage</a>
+      <a href="#" id="nav-index">Index</a>
+      <a href="#" id="nav-settings">Settings</a>
+    </nav>
+    <main id="content">{% block content %}{% endblock %}</main>
+    <footer id="status-bar">
+      Server: 127.0.0.1:8741
+    </footer>
   </body>
 </html>
