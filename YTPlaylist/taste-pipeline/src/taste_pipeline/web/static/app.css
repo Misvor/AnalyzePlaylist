@@ -1,0 +1,6 @@
+/* Taste Pipeline web UI — placeholder stylesheet (the real shell lands with the htmx todo). */
+
+body {
+  margin: 0;
+  font-family: system-ui, "Segoe UI", sans-serif;
+}

@@ -13,6 +13,8 @@ dependencies = [
     "librosa",
     "fastapi",
     "uvicorn[standard]",
+    "pywebview",
+    "jinja2",
     "httpx",
     "pytest",
     "ruff",
