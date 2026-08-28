@@ -60,4 +60,9 @@ def create_app(config: Config) -> FastAPI:
     app.include_router(triage_router)
     app.state.runner = JobRunner(config.data_dir)
     app.state.templates = templates
+    # env.globals is the Jinja2 seam that makes config values reachable from
+    # every template render (status bar etc.) without per-render context wiring.
+    # Jinja2's stubs narrow globals to a fixed value-type union; runtime accepts any value.
+    templates.env.globals["server_host"] = config.web_host  # pyright: ignore[reportArgumentType]
+    templates.env.globals["server_port"] = config.web_port  # pyright: ignore[reportArgumentType]
     return app

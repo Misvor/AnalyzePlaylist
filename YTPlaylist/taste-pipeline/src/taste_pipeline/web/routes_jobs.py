@@ -14,10 +14,14 @@ Mounts four read/write endpoints under ``/api/jobs``:
   when the job reaches a terminal state.
 
 The mapping of pipeline pass kind to its ``run_fn`` is the module-level
-dict :data:`JOB_FACTORIES`. It is intentionally empty here -- todo-6 will
-populate it with the real ``feed`` / ``metadata`` / ``download`` /
-``index`` factories. Tests register a fake factory against the dict
-directly.
+dict :data:`JOB_FACTORIES`. Production wiring populates it lazily on
+the first ``POST /api/jobs`` via :func:`taste_pipeline.web.job_factories.register_factories`
+(so the real ``feed`` / ``metadata`` / ``download`` / ``index`` factories
+are bound to the app's config + state store at call time). Tests may
+inject fakes by setting keys directly (e.g. ``JOB_FACTORIES["feed"] = fake``)
+or via ``monkeypatch.setattr(routes_jobs, "JOB_FACTORIES", {...})``; the
+``if not JOB_FACTORIES`` guard in :func:`create_job` short-circuits the
+production registration when the dict is already populated.
 
 The runner itself is owned by the app: ``create_app`` sets
 ``app.state.runner = JobRunner(config.data_dir)`` so this module can
@@ -146,7 +150,7 @@ async def stream_job_events(request: Request, job_id: str) -> StreamingResponse:
     ``progress`` event whenever the job's ``progress`` or ``log_lines``
     changes. When the job reaches a terminal state, the generator emits
     a single ``done`` event and returns, which closes the SSE stream.
-    Each yield yields control back to the event loop (via ``asyncio.sleep(0)``
+    Each yield yields control back to the event loop (via ``asyncio.sleep(0.05)``
     between checks) so uvicorn flushes the response chunk immediately --
     no client-side buffering.
     """

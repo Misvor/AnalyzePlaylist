@@ -130,3 +130,33 @@ def test_base_template_contains_no_external_urls(tmp_path: Path) -> None:
     # Sanity: it still references the local static assets.
     assert "/static/app.css" in content
     assert "/static/vendor/htmx.min.js" in content
+
+
+def test_status_bar_uses_config_web_host_and_port(tmp_path: Path) -> None:
+    # Given a tmp config with non-default web_host + web_port
+    like_lib = tmp_path / "lib"
+    like_lib.mkdir()
+    body = (
+        f'like_library_dir = "{_toml_path(like_lib)}"\n'
+        f'data_dir = "{_toml_path(tmp_path / "data")}"\n'
+        f'cookie_file = "{_toml_path(tmp_path / "cookies.txt")}"\n'
+        f'web_host = "192.0.2.1"\n'
+        f"web_port = 9999\n"
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(body, encoding="utf-8")
+    client = TestClient(create_app(load_config(config_path)))
+
+    # When GETting the index page
+    response = client.get("/")
+
+    # Then the status bar renders the CUSTOM host:port from config, NOT the hardcoded default
+    assert response.status_code == 200
+    body_text = response.text
+    assert "Server: 192.0.2.1:9999" in body_text, (
+        f"status bar should render custom config web_host:web_port; got body:\n{body_text}"
+    )
+    # And the hardcoded default is absent (a regression to a literal would show it)
+    assert "Server: 127.0.0.1:8741" not in body_text, (
+        f"status bar must not contain the hardcoded default; got body:\n{body_text}"
+    )

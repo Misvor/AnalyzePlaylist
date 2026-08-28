@@ -5,21 +5,26 @@ TDD-first for todo-5 (job control + SSE progress endpoints). All tests use
 ``app.state.runner`` so no real thread pool or asyncio loop is involved.
 SSE tests use ``client.stream("GET", url)`` with ``iter_lines()`` -- the
 stream is closed by the ``with`` block when the generator returns.
+
+The ``FakeJobRunner`` / ``_FakeJob`` / ``_build_client_with_fake_runner`` /
+``_wait_for_terminal`` / ``_submit`` helpers live in ``tests/conftest.py``
+(shared with the triage-route test files via the same module-level
+import pattern) so the duplicate-helper bloat does not return.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import threading
 import time
 import uuid
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from fastapi.testclient import TestClient
-
-from taste_pipeline.config import Config, load_config
+from conftest import (
+    _build_client_with_fake_runner,
+    _make_config,
+    _submit,
+    _wait_for_terminal,
+)
 from taste_pipeline.web import create_app
 from taste_pipeline.web.jobs import JobRunner
 from taste_pipeline.web.routes_jobs import JOB_FACTORIES
@@ -28,165 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-
-def _toml_path(path: Path) -> str:
-    """Render a Path as a TOML-safe string (forward slashes avoid backslash escapes on Windows)."""
-    return path.as_posix()
-
-
-def _write_config(tmp_path: Path) -> Path:
-    """Write a minimal valid config TOML under tmp_path and return its path."""
-    like_lib = tmp_path / "lib"
-    like_lib.mkdir()
-    body = (
-        f'like_library_dir = "{_toml_path(like_lib)}"\n'
-        f'data_dir = "{_toml_path(tmp_path / "data")}"\n'
-        f'cookie_file = "{_toml_path(tmp_path / "cookies.txt")}"\n'
-    )
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(body, encoding="utf-8")
-    return config_path
-
-
-def _make_config(tmp_path: Path) -> Config:
-    """Build a real Config via load_config from a tmp TOML file."""
-    return load_config(_write_config(tmp_path))
-
-
-class _FakeJob:
-    """A synchronous stand-in for the real Job dataclass -- drives state in a background thread."""
-
-    def __init__(
-        self,
-        job_id: uuid.UUID,
-        kind: str,
-        run_fn: Callable[[Callable[[float, str], None]], None] | None = None,
-    ) -> None:
-        self.id = job_id
-        self.kind = kind
-        self.status = "queued"
-        self.progress = 0.0
-        self.log_lines: list[str] = []
-        self.started_at: datetime | None = None
-        self.finished_at: datetime | None = None
-        self.error: str | None = None
-        self._run_fn = run_fn
-        self._thread: threading.Thread | None = None
-        self._cancel_event = threading.Event()
-        self._lock = threading.Lock()
-        self.start()
-
-    def start(self) -> None:
-        """Spawn the background worker thread that calls the injected run_fn."""
-        self._thread = threading.Thread(target=self._drive, daemon=True)
-        self._thread.start()
-
-    def _drive(self) -> None:
-        with self._lock:
-            if self._cancel_event.is_set():
-                self.status = "cancelled"
-                self.finished_at = datetime.now(UTC)
-                return
-            self.started_at = datetime.now(UTC)
-            self.status = "running"
-
-        def report(progress: float, message: str) -> None:
-            with self._lock:
-                if self._cancel_event.is_set():
-                    return
-                self.progress = progress
-                self.log_lines.append(message)
-
-        try:
-            assert self._run_fn is not None
-            self._run_fn(report)
-        except Exception as exc:  # noqa: BLE001 -- fake runner mirrors JobRunner contract
-            with self._lock:
-                if self.status != "cancelled":
-                    self.status = "failed"
-                    self.error = str(exc)
-        finally:
-            with self._lock:
-                if self.status not in ("succeeded", "failed", "cancelled"):
-                    self.status = "succeeded"
-                    self.progress = 1.0
-                if self.finished_at is None:
-                    self.finished_at = datetime.now(UTC)
-
-    def cancel(self) -> None:
-        """Mark the job cancelled (the FakeJob also wakes its run_fn by no-op'ing report)."""
-        with self._lock:
-            self._cancel_event.set()
-            if self.status not in ("succeeded", "failed", "cancelled"):
-                self.status = "cancelled"
-                self.finished_at = datetime.now(UTC)
-
-
-class FakeJobRunner:
-    """Async stand-in for JobRunner -- same public shape, no real executor."""
-
-    def __init__(self) -> None:
-        self._jobs: dict[uuid.UUID, _FakeJob] = {}
-        self._active_by_kind: dict[str, _FakeJob] = {}
-        self.submit_calls: list[tuple[str, Callable[[Callable[[float, str], None]], None]]] = []
-
-    async def submit(
-        self,
-        kind: str,
-        run_fn: Callable[[Callable[[float, str], None]], None],
-    ) -> _FakeJob:
-        """Create a new _FakeJob; raise if an active job of the same kind exists."""
-        self.submit_calls.append((kind, run_fn))
-        active = self._active_by_kind.get(kind)
-        if active is not None and active.status not in ("succeeded", "failed", "cancelled"):
-            msg = f"concurrent job of kind {kind!r} already in progress (job_id={active.id})"
-            raise RuntimeError(msg)
-        job = _FakeJob(uuid.uuid4(), kind, run_fn)
-        self._jobs[job.id] = job
-        self._active_by_kind[kind] = job
-        return job
-
-    def get(self, job_id: uuid.UUID) -> _FakeJob:
-        """Return the live _FakeJob for job_id; raise KeyError if unknown."""
-        if job_id not in self._jobs:
-            msg = f"job {job_id} not found"
-            raise KeyError(msg)
-        return self._jobs[job_id]
-
-    def list(self) -> list[_FakeJob]:
-        """Return all jobs in newest-first order."""
-        return list(reversed(list(self._jobs.values())))
-
-
-def _build_client_with_fake_runner(
-    tmp_path: Path,
-) -> tuple[TestClient, FakeJobRunner]:
-    """Construct an app, inject a FakeJobRunner on app.state, and return (client, runner)."""
-    cfg = _make_config(tmp_path)
-    app = create_app(cfg)
-    runner = FakeJobRunner()
-    app.state.runner = runner
-    return TestClient(app), runner
-
-
-def _wait_for_terminal(job: _FakeJob, *, timeout_s: float = 2.0) -> _FakeJob:
-    """Spin-wait until the FakeJob reaches a terminal status; raise on timeout."""
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if job.status in ("succeeded", "failed", "cancelled"):
-            return job
-        time.sleep(0.005)
-    msg = f"job {job.id} did not reach terminal state within {timeout_s}s"
-    raise AssertionError(msg)
-
-
-def _submit(
-    runner: FakeJobRunner,
-    kind: str,
-    run_fn: Callable[[Callable[[float, str], None]], None],
-) -> _FakeJob:
-    """Drive an async FakeJobRunner.submit from a synchronous test."""
-    return asyncio.run(runner.submit(kind, run_fn))
+    from fastapi.testclient import TestClient
 
 
 def test_post_jobs_creates_job_and_returns_201_with_json(tmp_path: Path) -> None:
