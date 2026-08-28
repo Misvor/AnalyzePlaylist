@@ -6,17 +6,18 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from taste_pipeline.config import Config, ConfigError, load_config
+from taste_pipeline.config import Config, load_config
 from taste_pipeline.web import __main__ as web_main
 from taste_pipeline.web import create_app
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    import pytest
 
 
 def _toml_path(path: Path) -> str:
@@ -163,14 +164,23 @@ def test_window_mode_runs_uvicorn_on_background_thread_and_webview_on_main(
     start_mock.assert_called_once_with()
 
 
-def test_missing_config_file_raises_config_error(tmp_path: Path) -> None:
+def test_missing_config_prints_fix_and_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # Given a --config path that does not exist
     missing = tmp_path / "absent.toml"
 
     # When invoking the entry point
-    # Then load_config's ConfigError propagates (CLI exits non-zero)
-    with pytest.raises(ConfigError):
-        web_main.main(["--config", str(missing)])
+    # Then the entry point exits non-zero with the helpful fix message
+    # (does NOT raise ConfigError -- the CLI swallows the "not found" case
+    # so it can print a self-explanatory fix to the user; other ConfigError
+    # kinds, e.g. malformed TOML, still propagate unchanged).
+    exit_code = web_main.main(["--config", str(missing)])
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "No config.toml found" in captured.err
+    assert "--config <path>" in captured.err
+    assert "TASTE_PIPELINE_CONFIG" in captured.err
+    assert "cp config.example.toml config.toml" in captured.err
 
 
 def test_argparse_defaults_to_window_mode_and_optional_config(tmp_path: Path) -> None:

@@ -27,6 +27,15 @@ The runner itself is owned by the app: ``create_app`` sets
 ``app.state.runner = JobRunner(config.data_dir)`` so this module can
 read it via ``request.app.state.runner`` (cast to satisfy
 ``basedpyright typeCheckingMode="all"`` which forbids raw ``Any``).
+
+Body parsing for ``POST /api/jobs`` is manual via
+:meth:`starlette.requests.Request.json` (which works on
+``application/json`` bodies without requiring ``python-multipart`` --
+unlike FastAPI's :class:`Form` parameter, which would need that extra
+dep). Form-encoded bodies, empty bodies, and malformed JSON all return
+422 -- the endpoint is intentionally JSON-only; the dashboard buttons
+carry ``hx-encoding="json"`` as belt-and-suspenders for browsers where
+htmx honors the attribute, but the backend does not depend on it.
 """
 
 from __future__ import annotations
@@ -34,19 +43,16 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid as _uuid
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from taste_pipeline.config import Config
     from taste_pipeline.web.jobs import Job, JobRunner
-
-JobKind = Literal["feed", "metadata", "download", "index"]
 
 router = APIRouter(prefix="/api")
 
@@ -58,11 +64,11 @@ JOB_FACTORIES: dict[str, Callable[[Callable[[float, str], None]], None]] = {}
 
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
 
-
-class JobCreateRequest(BaseModel):
-    """Body schema for ``POST /api/jobs``: Pydantic Literal validation rejects unknown kinds."""
-
-    kind: JobKind
+# Single source of truth for valid job kinds -- checked at runtime in
+# :func:`create_job` against the parsed JSON body. Tests should NOT
+# hardcode a 4-element tuple; iterate this set instead so a future
+# new kind is added by editing one place.
+_KNOWN_KINDS: frozenset[str] = frozenset({"feed", "metadata", "download", "index"})
 
 
 def _job_to_payload(job: Job) -> dict[str, object]:
@@ -85,21 +91,64 @@ def _sse(payload: dict[str, object]) -> str:
 
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
-async def create_job(request: Request, body: JobCreateRequest) -> dict[str, object]:
+async def create_job(request: Request) -> dict[str, object]:
     """Submit a new job of the given ``kind``; returns the job JSON with status 201.
 
-    On the first request, lazily populates :data:`JOB_FACTORIES` with the
-    real pipeline factories bound to the app's ``config`` and a fresh
-    :class:`StateStore` over ``config.data_dir``. Tests register fakes
-    directly into :data:`JOB_FACTORIES` (the dict stays non-empty, the
-    ``if not JOB_FACTORIES`` guard short-circuits, the test's fake wins).
+    The JSON body ``{"kind": "feed"|"metadata"|"download"|"index"}`` is
+    parsed manually via :meth:`Request.json` (Starlette), which works
+    on ``application/json`` bodies without needing ``python-multipart``.
+    This is resilient to htmx clients with or without
+    ``hx-encoding="json"``, ``fetch``, ``curl``, ``axios`` -- any client
+    that sends a proper JSON body. Form-encoded bodies, empty bodies,
+    and malformed JSON all return 422 -- the endpoint is JSON-only by
+    contract.
+
+    On the first request, lazily populates :data:`JOB_FACTORIES` with
+    the real pipeline factories bound to the app's ``config`` and a
+    fresh :class:`StateStore` over ``config.data_dir``. Tests register
+    fakes directly into :data:`JOB_FACTORIES` (the dict stays
+    non-empty, the ``if not JOB_FACTORIES`` guard short-circuits, the
+    test's fake wins).
 
     Raises:
-        HTTPException: 422 if ``body.kind`` is not in :data:`JOB_FACTORIES`.
-            (Pydantic Literal already rejects unknown string values with 422
-            before this handler runs; the explicit check guards the case
-            where a kind is in the Literal but has no registered factory.)
+        HTTPException: 422 on any of the following:
+            - body is not valid JSON
+            - body is not a JSON object
+            - ``kind`` is missing
+            - ``kind`` is not a string
+            - ``kind`` is not in :data:`_KNOWN_KINDS`
+            - ``kind`` is a known kind but no factory is registered
+              (defensive guard for misconfigured deployments;
+              ``pragma: no cover``).
     """
+    try:
+        # Starlette's Request.json() is stubbed to return Any; the isinstance
+        # check below narrows the union to dict after the non-dict branches raise.
+        raw: object = await request.json()  # pyright: ignore[reportAny]
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"invalid JSON body: {exc.msg}",
+        ) from exc
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"request body must be a JSON object, got {type(raw).__name__}",
+        )
+    payload = cast("dict[str, object]", raw)
+    kind_raw = payload.get("kind")
+    if not isinstance(kind_raw, str):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="'kind' must be a string",
+        )
+    kind: str = kind_raw
+    if kind not in _KNOWN_KINDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"unknown kind {kind!r}; valid kinds: {sorted(_KNOWN_KINDS)}",
+        )
+
     app = cast("FastAPI", request.app)
     config = cast("Config", app.state.config)
     runner = cast("JobRunner", app.state.runner)
@@ -109,13 +158,13 @@ async def create_job(request: Request, body: JobCreateRequest) -> dict[str, obje
 
         state = StateStore(config.data_dir)
         register_factories(JOB_FACTORIES, config, state)
-    factory = JOB_FACTORIES.get(body.kind)
-    if factory is None:  # pragma: no cover -- defensive guard against unregistered Literal members
+    factory = JOB_FACTORIES.get(kind)
+    if factory is None:  # pragma: no cover -- defensive guard against unregistered _KNOWN_KINDS members
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"no factory registered for job kind {body.kind!r}",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"no factory registered for job kind {kind!r}",
         )
-    job = await runner.submit(body.kind, factory)
+    job = await runner.submit(kind, factory)
     return _job_to_payload(job)
 
 

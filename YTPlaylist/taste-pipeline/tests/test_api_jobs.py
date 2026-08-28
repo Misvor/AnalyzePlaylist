@@ -84,6 +84,57 @@ def test_post_jobs_missing_kind_returns_422(tmp_path: Path) -> None:
     assert response.status_code == 422
 
 
+def test_post_jobs_form_encoded_body_returns_422(tmp_path: Path) -> None:
+    # Given an app with an empty JOB_FACTORIES (no factories registered yet)
+    client, _runner = _build_client_with_fake_runner(tmp_path)
+
+    # When POSTing a form-encoded body (the default htmx encoding without hx-encoding="json")
+    response = client.post("/api/jobs", data={"kind": "feed"})
+
+    # Then 422 -- the endpoint is JSON-only by contract; form-encoded bodies
+    # are rejected with a clear error so dashboard regressions surface fast.
+    # Locks the "manual JSON parsing" contract: backend does not depend on
+    # python-multipart, does not need to support form bodies.
+    assert response.status_code == 422
+    payload = response.json()
+    assert "invalid JSON body" in payload["detail"], f"expected invalid-JSON error message, got {payload!r}"
+
+
+def test_post_jobs_non_string_kind_returns_422(tmp_path: Path) -> None:
+    # Given an app with an empty JOB_FACTORIES
+    client, _runner = _build_client_with_fake_runner(tmp_path)
+
+    # When POSTing a JSON body where kind is not a string
+    response = client.post("/api/jobs", json={"kind": 42})
+
+    # Then 422 with a "must be a string" message
+    assert response.status_code == 422
+    assert "string" in response.json()["detail"]
+
+
+def test_post_jobs_non_object_body_returns_422(tmp_path: Path) -> None:
+    # Given an app with an empty JOB_FACTORIES
+    client, _runner = _build_client_with_fake_runner(tmp_path)
+
+    # When POSTing a JSON body that is a top-level array, not an object
+    response = client.post("/api/jobs", json=["feed"])
+
+    # Then 422 -- the body must be a JSON object
+    assert response.status_code == 422
+    assert "JSON object" in response.json()["detail"]
+
+
+def test_post_jobs_empty_body_returns_422(tmp_path: Path) -> None:
+    # Given an app with an empty JOB_FACTORIES
+    client, _runner = _build_client_with_fake_runner(tmp_path)
+
+    # When POSTing with no body at all
+    response = client.post("/api/jobs")
+
+    # Then 422 (request.json() raises JSONDecodeError on empty body)
+    assert response.status_code == 422
+
+
 def test_get_jobs_returns_list_newest_first(tmp_path: Path) -> None:
     # Given an app with two jobs submitted (different kinds so no conflict)
     client, runner = _build_client_with_fake_runner(tmp_path)
