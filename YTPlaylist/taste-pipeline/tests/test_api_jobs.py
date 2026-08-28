@@ -15,12 +15,14 @@ import pattern) so the duplicate-helper bloat does not return.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import TYPE_CHECKING
 
 from conftest import (
     _build_client_with_fake_runner,
+    _client,
     _make_config,
     _submit,
     _wait_for_terminal,
@@ -217,3 +219,40 @@ def test_create_app_attaches_real_job_runner_to_state(tmp_path: Path) -> None:
     # Then app.state.runner is a real JobRunner bound to the config's data_dir
     assert isinstance(app.state.runner, JobRunner)
     assert app.state.runner._data_dir == cfg.data_dir
+
+
+def test_dashboard_run_buttons_use_hx_encoding_json_for_api_jobs(tmp_path: Path) -> None:
+    # Given an app built from a valid config (real route rendering the dashboard)
+    client = _client(tmp_path)
+
+    # When requesting the dashboard page
+    response = client.get("/")
+
+    # Then every run button must carry hx-encoding="json" so POST /api/jobs
+    # receives a JSON body (Pydantic JobCreateRequest) instead of form-encoded.
+    assert response.status_code == 200
+    body = response.text
+
+    expected_buttons = (
+        ("run-feed", '"kind":"feed"'),
+        ("run-metadata", '"kind":"metadata"'),
+        ("run-download", '"kind":"download"'),
+        ("run-index", '"kind":"index"'),
+    )
+    hx_encoding_marker = 'hx-encoding="json"'
+    for button_id, expected_kind_marker in expected_buttons:
+        pattern = r'<button\b[^>]*\bid="' + button_id + r'"[^>]*>.*?</button>'
+        match = re.search(pattern, body, flags=re.DOTALL)
+        assert match is not None, f"button {button_id!r} missing from dashboard"
+        block = match.group(0)
+        assert hx_encoding_marker in block, (
+            f"button {button_id!r} missing {hx_encoding_marker}; "
+            f"htmx will send form-encoded body and POST /api/jobs returns 422"
+        )
+        assert 'hx-post="/api/jobs"' in block, f"button {button_id!r} no longer posts to /api/jobs"
+        assert expected_kind_marker in block, (
+            f"button {button_id!r} hx-vals does not contain {expected_kind_marker!r}"
+        )
+
+    actual_count = body.count(hx_encoding_marker)
+    assert actual_count == 4, f"expected exactly 4 {hx_encoding_marker} attributes, found {actual_count}"

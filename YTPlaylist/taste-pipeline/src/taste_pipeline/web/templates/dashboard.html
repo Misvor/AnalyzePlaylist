@@ -16,16 +16,16 @@
 
   <div id="run-buttons">
     <button id="run-feed" class="run-button"
-            hx-post="/api/jobs" hx-vals='{"kind":"feed"}'
+            hx-post="/api/jobs" hx-encoding="json" hx-vals='{"kind":"feed"}'
             hx-target="#run-history-body" hx-swap="afterbegin">Pass A — Feed</button>
     <button id="run-metadata" class="run-button"
-            hx-post="/api/jobs" hx-vals='{"kind":"metadata"}'
+            hx-post="/api/jobs" hx-encoding="json" hx-vals='{"kind":"metadata"}'
             hx-target="#run-history-body" hx-swap="afterbegin">Pass B — Metadata</button>
     <button id="run-download" class="run-button"
-            hx-post="/api/jobs" hx-vals='{"kind":"download"}'
+            hx-post="/api/jobs" hx-encoding="json" hx-vals='{"kind":"download"}'
             hx-target="#run-history-body" hx-swap="afterbegin">Pass C — Download</button>
     <button id="run-index" class="run-button"
-            hx-post="/api/jobs" hx-vals='{"kind":"index"}'
+            hx-post="/api/jobs" hx-encoding="json" hx-vals='{"kind":"index"}'
             hx-target="#run-history-body" hx-swap="afterbegin">Build Index</button>
   </div>
 
