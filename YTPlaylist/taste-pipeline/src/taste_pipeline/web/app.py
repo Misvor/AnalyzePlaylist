@@ -52,6 +52,10 @@ def create_app(config: Config, *, config_path: Path | None = None) -> FastAPI:
     """
     app = FastAPI(title="Taste Pipeline")
     app.state.config = config
+    # Snapshot of the currently-running config; set once at app construction and NEVER updated
+    # by POST /api/config. The settings page compares it to on-disk config.toml to detect
+    # unapplied path / network changes (file != running = banner). Rebuilt on next restart.
+    app.state.running_config = config
     app.state.config_path = config_path
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     templates = Jinja2Templates(directory=_TEMPLATES_DIR)

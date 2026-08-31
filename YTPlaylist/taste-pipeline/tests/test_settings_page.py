@@ -1,8 +1,9 @@
-"""Tests for taste_pipeline.web.routes_settings: read-only Settings page.
+"""Tests for taste_pipeline.web.routes_settings: editable Settings page.
 
 The Settings page is the human-facing mirror of the JSON
-``GET /api/config`` endpoint (todo-3). It shows every ``Config`` field
-name + its current value as a two-column table so the user can audit
+``GET /api/config`` endpoint (todo-3), evolved into a fully editable
+form (post-todo-3). It shows every ``Config`` field name + its current
+value as a two-column editable form so the user can audit AND change
 their pipeline setup without opening ``config.toml`` in a text editor.
 
 Page contract (locked by these tests):
@@ -25,10 +26,17 @@ Page contract (locked by these tests):
 - Optional numeric fields (``keep_threshold``, ``skip_threshold``) may
   be ``None`` (no thresholds configured); the page renders ``None`` as
   the literal string ``None`` so the user can see "this is unset"
-  without a crash. There is no form / no POST; the page is read-only.
+  without a crash.
 - Numeric fields render with their decimal string form
   (``web_port=8741``, ``feed_window_days=7``) so the user can confirm
   the values match what they expect.
+- Every Config field is editable in the form, including path / network
+  fields (``like_library_dir``, ``data_dir``, ``cookie_file``,
+  ``download_archive``, ``web_host``, ``web_port``). Path / network
+  changes are persisted to ``config.toml`` but only take effect after
+  a process restart; the "Unapplied path / network changes -- restart
+  required" banner renders when the on-disk file differs from
+  ``app.state.running_config`` (the snapshot taken at app startup).
 
 All tests use ``tmp_path`` for a fresh ``data_dir`` and never read the
 user's real config. The ``cookie_file`` test writes a sentinel file
@@ -38,6 +46,7 @@ leaked into the HTML.
 
 from __future__ import annotations
 
+import re
 from dataclasses import fields
 from typing import TYPE_CHECKING
 
@@ -264,11 +273,9 @@ def test_get_settings_renders_numeric_fields_correctly(tmp_path: Path) -> None:
 # ── Editable-settings contract (POST /api/config) ────────────────────────
 
 
-# The editable + read-only split is the contract the form renders and the
-# POST handler enforces. Each entry here is the canonical name from
-# ``dataclasses.fields(Config)``; the test asserts every Config field is
-# classified into exactly one bucket so a future config drift cannot
-# silently land a path field in the editable bucket (or vice versa).
+# The editable-field classification is the contract the form renders and the
+# POST handler enforces. Every Config field is editable; path / network fields
+# additionally trigger the restart-required banner (see _PATH_NETWORK_FIELDS).
 EXPECTED_EDITABLE_FIELDS = frozenset(
     {
         "keep_threshold",
@@ -281,9 +288,15 @@ EXPECTED_EDITABLE_FIELDS = frozenset(
         "min_chunk_seconds",
         "sample_rate",
         "model_name",
+        "like_library_dir",
+        "data_dir",
+        "cookie_file",
+        "download_archive",
+        "web_host",
+        "web_port",
     }
 )
-EXPECTED_READONLY_FIELDS = frozenset(
+EXPECTED_PATH_NETWORK_FIELDS = frozenset(
     {
         "like_library_dir",
         "data_dir",
@@ -316,31 +329,104 @@ def test_get_settings_returns_form_with_inputs_for_editable_fields(tmp_path: Pat
         )
 
 
-def test_get_settings_renders_readonly_fields_without_inputs(tmp_path: Path) -> None:
+def test_get_settings_renders_path_fields_as_editable_inputs(tmp_path: Path) -> None:
     # Given a real app built from a tmp config
     client = _client(tmp_path)
 
     # When requesting the settings page
     response = client.get("/settings")
 
-    # Then every read-only Config field is rendered as text (a <code> or
-    # plain value cell) and has NO <input name=...> -- otherwise the
-    # form would post path keys to POST /api/config.
+    # Then every path / network field renders as an <input> with the
+    # matching name attribute. The form is wired to POST these via
+    # collectEditableFields(); without an input the user cannot edit
+    # the field from the GUI.
     assert response.status_code == 200
     body = response.text
-    for field_name in EXPECTED_READONLY_FIELDS:
-        assert field_name in body, (
-            f"settings page missing read-only field {field_name!r}; "
-            f"the user needs to see WHERE the cookies / data live"
+    path_fields = {"like_library_dir", "data_dir", "cookie_file", "download_archive"}
+    for field_name in path_fields:
+        assert f'name="{field_name}"' in body, (
+            f"settings form missing an input for editable path field {field_name!r}; "
+            "the user cannot edit a field that has no input"
         )
-        # Belt-and-suspenders: the field name MUST NOT appear as a
-        # form input name (which would mean the form is wired to
-        # submit it to POST /api/config).
-        assert f'name="{field_name}"' not in body, (
-            f"settings form has an input named {field_name!r} but it is read-only; "
-            f"the POST handler would reject it with 422 (and the user has no "
-            f"reason to type into a disabled field)"
-        )
+
+
+def test_get_settings_renders_network_fields_as_editable_inputs(tmp_path: Path) -> None:
+    # Given a real app built from a tmp config
+    client = _client(tmp_path)
+
+    # When requesting the settings page
+    response = client.get("/settings")
+
+    # Then web_host renders as an <input type="text"> (maxlength 255)
+    # and web_port renders as an <input type="number"> with min=1 /
+    # max=65535 so the browser rejects obviously-invalid ports before
+    # the form submits.
+    assert response.status_code == 200
+    body = response.text
+    assert 'name="web_host"' in body, (
+        "settings form missing the web_host input; the user cannot change the bind address"
+    )
+    assert 'name="web_port"' in body, (
+        "settings form missing the web_port input; the user cannot change the bind port"
+    )
+    # The port input is constrained client-side so users cannot enter
+    # 0 / negative / 99999 — the browser blocks the form submission.
+    port_match = re.search(
+        r'<input id="field-web_port" name="web_port"[^>]*>',
+        body,
+    )
+    assert port_match, "settings form web_port input tag not found"
+    port_tag = port_match.group(0)
+    assert 'type="number"' in port_tag, f"web_port input must be type=number; got {port_tag!r}"
+    assert 'min="1"' in port_tag, f"web_port input must declare min=1; got {port_tag!r}"
+    assert 'max="65535"' in port_tag, f"web_port input must declare max=65535; got {port_tag!r}"
+
+
+def test_get_settings_shows_unapplied_changes_banner_when_path_differs(tmp_path: Path) -> None:
+    # Given a tmp config.toml that DIFFERS from the running snapshot:
+    # the file on disk has like_library_dir = a NEW directory, but
+    # the app was built with the original like_library_dir. The
+    # banner must surface this divergence as "restart required".
+    original_lib = tmp_path / "lib"
+    original_lib.mkdir(exist_ok=True)
+    body = (
+        f'like_library_dir = "{_toml_path(original_lib)}"\n'
+        f'data_dir = "{_toml_path(tmp_path / "data")}"\n'
+        f'cookie_file = "{_toml_path(tmp_path / "cookies.txt")}"\n'
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(body, encoding="utf-8")
+    # Build the app with the ORIGINAL config (so app.state.running_config
+    # is the original), then re-write the file to point at a NEW dir.
+    running_cfg = load_config(config_path)
+    new_lib = tmp_path / "new_lib"
+    new_lib.mkdir(exist_ok=True)
+    config_path.write_text(
+        body.replace(_toml_path(original_lib), _toml_path(new_lib)),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(running_cfg, config_path=config_path))
+
+    # When requesting the settings page
+    response = client.get("/settings")
+
+    # Then the unapplied-changes banner is rendered with both old +
+    # new values so the user can see WHICH field needs a restart.
+    assert response.status_code == 200
+    body_text = response.text
+    assert 'id="settings-unapplied-banner"' in body_text, (
+        "settings page is missing the unapplied-changes banner element; "
+        "the user has no way to know their path edit requires a restart"
+    )
+    assert "restart required" in body_text.lower(), (
+        "settings page banner does not explain the user must restart the server"
+    )
+    assert _toml_path(original_lib) in body_text, (
+        f"banner must show the OLD value {_toml_path(original_lib)!r} for like_library_dir"
+    )
+    assert _toml_path(new_lib) in body_text, (
+        f"banner must show the NEW value {_toml_path(new_lib)!r} for like_library_dir"
+    )
 
 
 def test_post_config_updates_keep_threshold_in_memory_and_on_disk(tmp_path: Path) -> None:
@@ -418,39 +504,6 @@ def test_post_config_atomic_write_creates_no_temp_file_on_success(tmp_path: Path
     assert response.status_code == 200
     tmp_left = config_path.with_suffix(config_path.suffix + ".tmp")
     assert not tmp_left.exists(), f"atomic write left a stray {tmp_left}; Path.replace() should have moved it"
-
-
-def test_post_config_does_not_persist_path_fields(tmp_path: Path) -> None:
-    """Even if the user crafts a JSON body with like_library_dir, the server rejects it.
-
-    This locks the contract: path edits require a restart. A regression
-    that accepted path keys would either (a) try to move directories
-    at runtime (likely to fail with permission errors) or (b) silently
-    update app.state.config without the on-disk effect the user
-    expects (worse -- the next restart restores the old path).
-    """
-    # Given a real app
-    config_path = _write_config(tmp_path)
-    client = _client(tmp_path)
-
-    # When POSTing a path field
-    response = client.post(
-        "/api/config",
-        json={"like_library_dir": str(tmp_path / "somewhere_else")},
-    )
-
-    # Then 422 (read-only field)
-    assert response.status_code == 422, (
-        f"POST /api/config with a path field returned {response.status_code}; expected 422"
-    )
-    assert "read-only" in response.json()["detail"], (
-        f"error detail should mention read-only; got {response.json()['detail']!r}"
-    )
-    # And the file was not modified (the atomic write never happened)
-    reloaded = load_config(config_path)
-    assert str(reloaded.like_library_dir) == str(tmp_path / "lib"), (
-        f"on-disk like_library_dir was modified despite the 422: {reloaded.like_library_dir!r}"
-    )
 
 
 def test_post_config_returns_updated_config_json(tmp_path: Path) -> None:
@@ -545,3 +598,153 @@ def test_post_config_rejects_skip_threshold_gte_keep_threshold(tmp_path: Path) -
     detail = response.json()["detail"]
     assert "skip_threshold" in detail, f"error detail should name skip_threshold; got {detail!r}"
     assert "keep_threshold" in detail, f"error detail should name keep_threshold; got {detail!r}"
+
+
+# ── Editable path / network fields (restart required) ─────────────────
+
+
+def test_post_config_accepts_path_field_and_persists_to_disk(tmp_path: Path) -> None:
+    # Given a real app and a NEW like_library_dir (a real directory under tmp_path)
+    config_path = _write_config(tmp_path)
+    client = _client(tmp_path)
+    new_lib = tmp_path / "new_lib"
+    new_lib.mkdir(exist_ok=True)
+
+    # When POSTing a new like_library_dir
+    response = client.post("/api/config", json={"like_library_dir": str(new_lib)})
+
+    # Then 200, the response payload reflects the change, and the on-disk file does too
+    assert response.status_code == 200, (
+        f"POST /api/config with like_library_dir returned {response.status_code}; expected 200; "
+        f"body={response.text[:300]}"
+    )
+    payload = response.json()
+    assert payload["like_library_dir"] == str(new_lib), (
+        f"response payload did not reflect the like_library_dir update; got {payload['like_library_dir']!r}"
+    )
+    reloaded = load_config(config_path)
+    assert str(reloaded.like_library_dir) == str(new_lib), (
+        f"on-disk like_library_dir was not persisted; reload sees {reloaded.like_library_dir!r}"
+    )
+    # And subsequent GET /settings shows the new value (in-memory state refreshed)
+    response2 = client.get("/settings")
+    assert str(new_lib) in response2.text, (
+        "GET /settings after POST did not show the new like_library_dir; "
+        "app.state.config was not refreshed to match the on-disk file"
+    )
+    # And the restart-required banner is now showing the divergence
+    # between app.state.running_config (still the original) and the
+    # on-disk file (now the new path).
+    assert 'id="settings-unapplied-banner"' in response2.text, (
+        "GET /settings after a like_library_dir edit is missing the restart-required banner; "
+        "app.state.running_config was updated by the POST handler (it must NOT be)"
+    )
+
+
+def test_post_config_rejects_path_field_pointing_to_a_file(tmp_path: Path) -> None:
+    # Given a real app and a file (not a directory) at the target path
+    client = _client(tmp_path)
+    file_path = tmp_path / "not_a_dir.flac"
+    file_path.write_bytes(b"FAKE_FLAC_HEADER" + b"\x00" * 32)
+
+    # When POSTing a like_library_dir that points at a file
+    response = client.post("/api/config", json={"like_library_dir": str(file_path)})
+
+    # Then 422 with a clear message
+    assert response.status_code == 422, (
+        f"POST /api/config with like_library_dir pointing at a file returned {response.status_code}; "
+        f"expected 422; body={response.text[:200]}"
+    )
+    detail = response.json()["detail"]
+    assert "like_library_dir" in detail, f"error detail should name the field; got {detail!r}"
+    assert "not a directory" in detail, f"error detail should explain the validation rule; got {detail!r}"
+
+
+def test_post_config_rejects_invalid_web_port(tmp_path: Path) -> None:
+    # Given a real app
+    client = _client(tmp_path)
+
+    # When POSTing web_port out of the TCP range
+    response = client.post("/api/config", json={"web_port": 99999})
+
+    # Then 422
+    assert response.status_code == 422, (
+        f"POST /api/config with web_port=99999 returned {response.status_code}; expected 422"
+    )
+    detail = response.json()["detail"]
+    assert "web_port" in detail, f"error detail should name web_port; got {detail!r}"
+    assert "[1, 65535]" in detail, f"error detail should mention the valid port range; got {detail!r}"
+
+
+def test_post_config_rejects_non_string_web_host(tmp_path: Path) -> None:
+    # Given a real app
+    client = _client(tmp_path)
+
+    # When POSTing web_host as a non-string (an int)
+    response = client.post("/api/config", json={"web_host": 123})
+
+    # Then 422
+    assert response.status_code == 422, (
+        f"POST /api/config with web_host=123 returned {response.status_code}; expected 422"
+    )
+    detail = response.json()["detail"]
+    assert "web_host" in detail, f"error detail should name web_host; got {detail!r}"
+    assert "must be a string" in detail, f"error detail should mention the type requirement; got {detail!r}"
+
+
+def test_post_config_accepts_data_dir_and_persists(tmp_path: Path) -> None:
+    # Given a real app and a new data_dir under tmp_path (load_config auto-creates it)
+    config_path = _write_config(tmp_path)
+    client = _client(tmp_path)
+    new_data = tmp_path / "new_data"
+
+    # When POSTing the new data_dir (it does not exist yet — load_config will create it)
+    response = client.post("/api/config", json={"data_dir": str(new_data)})
+
+    # Then 200 and persisted
+    assert response.status_code == 200, (
+        f"POST /api/config with new data_dir returned {response.status_code}; expected 200; "
+        f"body={response.text[:300]}"
+    )
+    reloaded = load_config(config_path)
+    assert str(reloaded.data_dir) == str(new_data), (
+        f"on-disk data_dir was not persisted; reload sees {reloaded.data_dir!r}"
+    )
+    # And load_config auto-created the dir
+    assert new_data.is_dir(), f"data_dir was not auto-created by load_config; {new_data!r} is not a directory"
+
+
+def test_post_config_accepts_web_host_and_persists(tmp_path: Path) -> None:
+    # Given a real app
+    config_path = _write_config(tmp_path)
+    client = _client(tmp_path)
+
+    # When POSTing a new web_host (LAN-bindable address)
+    response = client.post("/api/config", json={"web_host": "0.0.0.0"})  # noqa: S104 -- test exercises the LAN-bind path explicitly
+
+    # Then 200 and persisted
+    assert response.status_code == 200, (
+        f"POST /api/config with web_host=0.0.0.0 returned {response.status_code}; expected 200; "
+        f"body={response.text[:300]}"
+    )
+    reloaded = load_config(config_path)
+    assert reloaded.web_host == "0.0.0.0", (  # noqa: S104 -- test exercises the LAN-bind path explicitly
+        f"on-disk web_host was not persisted; reload sees {reloaded.web_host!r}"
+    )
+
+
+def test_post_config_accepts_web_port_in_valid_range(tmp_path: Path) -> None:
+    # Given a real app
+    config_path = _write_config(tmp_path)
+    client = _client(tmp_path)
+
+    # When POSTing a valid port
+    response = client.post("/api/config", json={"web_port": 9999})
+
+    # Then 200 and persisted
+    assert response.status_code == 200, (
+        f"POST /api/config with web_port=9999 returned {response.status_code}; expected 200; "
+        f"body={response.text[:300]}"
+    )
+    reloaded = load_config(config_path)
+    assert reloaded.web_port == 9999, f"on-disk web_port was not persisted; reload sees {reloaded.web_port!r}"

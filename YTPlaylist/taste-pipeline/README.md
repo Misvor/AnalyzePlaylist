@@ -60,7 +60,7 @@ safe default.
 | --- | --- |
 | `/` (Dashboard) | Four run buttons: **Pass A — feed**, **Pass B — metadata**, **Pass C — download**, **Build index**. Each button POSTs to `/api/jobs` and a run-history table shows past runs with live progress via SSE + htmx (progress bars, status badges, error text). |
 | `/triage` | Browse downloaded tracks from `inbox/`. Each row has an HTML5 `<audio controls>` element (range-request serving, seeking works) and four action buttons — **Keep** / **Review** / **Skip** / **Dislike** — that move the FLAC + sidecar into the matching `data_dir` subdir and update `downloads.stage`. |
-| `/settings` | Read-only display of every field in `Config` (paths shown as strings, optional thresholds render as the literal "None", cookie file path is shown but its contents are never rendered). |
+| `/settings` | Editable form for every field in `Config`. Changes to **Taste profile** and **Pipeline** (thresholds, scalar limits, chunk sizes, model name) take effect immediately. Changes to **Storage** (`like_library_dir`, `data_dir`, `cookie_file`, `download_archive`) and **Network** (`web_host`, `web_port`) are persisted to `config.toml` but only take effect after a process restart — the page surfaces an "Unapplied path / network changes — restart required" banner listing every divergent field with its old and new value, so the user can see exactly what the next restart will pick up. The cookie file path is rendered, never its contents. |
 
 ### What the GUI does NOT do (scope guardrails)
 

@@ -9,12 +9,34 @@
     <p id="settings-config-path">
       Editing <code>{{ config_path }}</code>.
       Changes to <em>Taste profile</em> and <em>Pipeline</em> take effect immediately.
-      Changes to <em>Paths &amp; network</em> require a process restart.
+      Changes to <em>Storage</em> and <em>Network</em> are persisted to disk but only
+      take effect after a process restart.
     </p>
   {% else %}
     <p id="settings-config-path-warning" class="badge" data-status="failed">
       No on-disk config path is known to the running process; the form below is disabled.
     </p>
+  {% endif %}
+
+  {% if unapplied_paths %}
+    <div id="settings-unapplied-banner" class="badge" data-status="failed"
+         data-banner-kind="restart-required">
+      <strong>Unapplied path / network changes — restart required.</strong>
+      The following fields have been saved to <code>{{ config_path }}</code> but the running
+      process is still using the old values:
+      <ul id="settings-unapplied-list">
+        {% for change in unapplied_paths %}
+          <li>
+            <code>{{ change.name }}</code>:
+            <span class="unapplied-old">{{ change.old }}</span>
+            &rarr;
+            <span class="unapplied-new">{{ change.new }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+      Save and restart the server
+      (<code>uv run python -m taste_pipeline.web</code>) to apply.
+    </div>
   {% endif %}
 
   <form id="settings-form"
@@ -81,19 +103,41 @@
     </fieldset>
 
     <fieldset class="settings-group">
-      <legend>Paths &amp; network <span class="settings-restart-badge">(restart required)</span></legend>
-      <table id="settings-table-readonly" class="settings-table">
+      <legend>Storage <span class="settings-restart-badge">(restart required)</span></legend>
+      <table id="settings-table-storage" class="settings-table">
         <thead>
           <tr><th>Field</th><th>Value</th></tr>
         </thead>
         <tbody>
-          {% for row in rows if not row.editable %}
-            <tr class="settings-row settings-readonly" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
-              <td class="field-name">{{ row.name }}</td>
-              <td class="field-value field-value-{{ row.kind }}">
-                {% if row.kind == "path" %}<code class="path-value">{{ row.value }}</code>
-                {% elif row.kind == "none" %}<em class="none-value">{{ row.value }}</em>
-                {% else %}{{ row.value }}{% endif %}
+          {% for row in rows if row.editable and row.name in ("like_library_dir","data_dir","cookie_file","download_archive") %}
+            <tr class="settings-row settings-editable settings-restart" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
+              <td class="field-name"><label for="field-{{ row.name }}">{{ row.name }}</label></td>
+              <td class="field-input">
+                <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" class="path-input"
+                       value="{{ row.value }}" autocomplete="off" />
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </fieldset>
+
+    <fieldset class="settings-group">
+      <legend>Network <span class="settings-restart-badge">(restart required)</span></legend>
+      <table id="settings-table-network" class="settings-table">
+        <thead>
+          <tr><th>Field</th><th>Value</th></tr>
+        </thead>
+        <tbody>
+          {% for row in rows if row.editable and row.name in ("web_host","web_port") %}
+            <tr class="settings-row settings-editable settings-restart" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
+              <td class="field-name"><label for="field-{{ row.name }}">{{ row.name }}</label></td>
+              <td class="field-input">
+                {% if row.kind == "int" %}
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="number" min="1" max="65535" step="1" value="{{ row.value }}" />
+                {% else %}
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" value="{{ row.value }}" maxlength="255" autocomplete="off" />
+                {% endif %}
               </td>
             </tr>
           {% endfor %}
@@ -110,10 +154,12 @@
 
   <script>
     // collectEditableFields: walks the form and builds a JSON object
-    // containing ONLY the editable <input> / <select> elements. The
-    // form is split into editable + read-only fieldsets so the POST
-    // handler never sees path keys in the body (the read-only fields
-    // are not in any <input name=...>).
+    // containing every editable <input> / <select> element. ALL fields
+    // are editable now (path / network fields included) -- the
+    // "restart required" badge on Storage + Network legends is a UI
+    // hint, not a write-protection. The POST handler validates each
+    // field independently and rejects with 422 on bad input; the
+    // server is bound to the OLD values until restart.
     (function () {
       window.collectEditableFields = function () {
         var out = {};
@@ -178,6 +224,12 @@
         if (target.id !== 'settings-result') return;
         if (xhr.status >= 200 && xhr.status < 300) {
           target.innerHTML = '<div class="badge" data-status="succeeded">Settings saved.</div>';
+          // Reload the page so the banner re-renders with the new
+          // unapplied set (file changed, running config unchanged).
+          // A partial DOM update would need to re-run the banner
+          // detection server-side; a full reload is cheaper and
+          // idempotent.
+          window.setTimeout(function () { window.location.reload(); }, 600);
         }
       });
     })();
