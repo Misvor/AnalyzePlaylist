@@ -20,6 +20,8 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
+from fastapi.testclient import TestClient
+
 from conftest import (
     _build_client_with_fake_runner,
     _client,
@@ -34,8 +36,6 @@ from taste_pipeline.web.routes_jobs import JOB_FACTORIES
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-    from fastapi.testclient import TestClient
 
 
 def test_post_jobs_creates_job_and_returns_201_with_json(tmp_path: Path) -> None:
@@ -272,15 +272,17 @@ def test_create_app_attaches_real_job_runner_to_state(tmp_path: Path) -> None:
     assert app.state.runner._data_dir == cfg.data_dir
 
 
-def test_dashboard_run_buttons_use_hx_encoding_json_for_api_jobs(tmp_path: Path) -> None:
+def test_dashboard_run_buttons_use_hx_ext_json_enc_for_api_jobs(tmp_path: Path) -> None:
     # Given an app built from a valid config (real route rendering the dashboard)
     client = _client(tmp_path)
 
     # When requesting the dashboard page
     response = client.get("/")
 
-    # Then every run button must carry hx-encoding="json" so POST /api/jobs
-    # receives a JSON body (Pydantic JobCreateRequest) instead of form-encoded.
+    # Then every run button must carry hx-ext="json-enc" so POST /api/jobs
+    # receives a JSON body (via the json-enc htmx extension). Without this
+    # extension, htmx 2.x falls back to application/x-www-form-urlencoded and
+    # the endpoint returns 422.
     assert response.status_code == 200
     body = response.text
 
@@ -290,14 +292,14 @@ def test_dashboard_run_buttons_use_hx_encoding_json_for_api_jobs(tmp_path: Path)
         ("run-download", '"kind":"download"'),
         ("run-index", '"kind":"index"'),
     )
-    hx_encoding_marker = 'hx-encoding="json"'
+    json_enc_marker = 'hx-ext="json-enc"'
     for button_id, expected_kind_marker in expected_buttons:
         pattern = r'<button\b[^>]*\bid="' + button_id + r'"[^>]*>.*?</button>'
         match = re.search(pattern, body, flags=re.DOTALL)
         assert match is not None, f"button {button_id!r} missing from dashboard"
         block = match.group(0)
-        assert hx_encoding_marker in block, (
-            f"button {button_id!r} missing {hx_encoding_marker}; "
+        assert json_enc_marker in block, (
+            f"button {button_id!r} missing {json_enc_marker}; "
             f"htmx will send form-encoded body and POST /api/jobs returns 422"
         )
         assert 'hx-post="/api/jobs"' in block, f"button {button_id!r} no longer posts to /api/jobs"
@@ -305,5 +307,44 @@ def test_dashboard_run_buttons_use_hx_encoding_json_for_api_jobs(tmp_path: Path)
             f"button {button_id!r} hx-vals does not contain {expected_kind_marker!r}"
         )
 
-    actual_count = body.count(hx_encoding_marker)
-    assert actual_count == 4, f"expected exactly 4 {hx_encoding_marker} attributes, found {actual_count}"
+    actual_count = body.count(json_enc_marker)
+    assert actual_count == 4, f"expected exactly 4 {json_enc_marker} attributes, found {actual_count}"
+
+
+def test_base_template_loads_htmx_and_json_enc_extension(tmp_path: Path) -> None:
+    # Given an app with the dashboard rendered
+    client = _client(tmp_path)
+
+    # When requesting the dashboard (which extends base.html)
+    response = client.get("/")
+    body = response.text
+
+    # Then base.html must load both htmx and the json-enc extension,
+    # in that order (json-enc depends on the global `htmx` symbol
+    # being defined when its script executes).
+    assert response.status_code == 200
+    htmx_idx = body.find("htmx.min.js")
+    json_enc_idx = body.find("htmx-json-enc.js")
+    assert htmx_idx != -1, "base.html does not load htmx.min.js"
+    assert json_enc_idx != -1, "base.html does not load htmx-json-enc.js"
+    assert htmx_idx < json_enc_idx, (
+        "htmx-json-enc.js must be loaded AFTER htmx.min.js (the extension's IIFE references window.htmx)"
+    )
+
+
+def test_static_vendor_htmx_json_enc_endpoint_serves_file(tmp_path: Path) -> None:
+    # Given an app
+    app = create_app(_make_config(tmp_path))
+    client = TestClient(app)
+
+    # When GETting the vendored json-enc extension
+    response = client.get("/static/vendor/htmx-json-enc.js")
+
+    # Then it serves with a JavaScript content-type and the extension
+    # body that calls htmx.defineExtension("json-enc", ...)
+    assert response.status_code == 200
+    assert "javascript" in response.headers.get("content-type", "").lower()
+    body = response.text
+    assert 'htmx.defineExtension("json-enc"' in body or "htmx.defineExtension('json-enc'" in body
+    assert "JSON.stringify" in body
+    assert "application/json" in body
