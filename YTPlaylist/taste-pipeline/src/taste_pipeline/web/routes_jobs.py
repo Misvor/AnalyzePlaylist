@@ -57,10 +57,14 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api")
 
 # Module-level registry mapping pipeline-pass kind to its run_fn factory.
-# Each factory has the signature ``Callable[[Callable[[float, str], None]], None]``
+# Each factory has the signature
+# ``Callable[[Callable[[float, str], None]], dict[str, object] | None]``
 # -- the same shape :class:`~taste_pipeline.web.jobs.JobRunner.submit` expects.
-# Populated by the pipeline-wiring task; tests register fakes directly.
-JOB_FACTORIES: dict[str, Callable[[Callable[[float, str], None]], None]] = {}
+# A factory may return a ``dict`` to stash a payload on ``Job.result``
+# (the check_url factory does this with a CheckResult dict); ``None`` is
+# the "no payload" signal. Populated by the pipeline-wiring task; tests
+# register fakes directly.
+JOB_FACTORIES: dict[str, Callable[[Callable[[float, str], None]], dict[str, object] | None]] = {}
 
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
 
@@ -68,7 +72,7 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "cancelle
 # :func:`create_job` against the parsed JSON body. Tests should NOT
 # hardcode a hardcoded tuple; iterate this set instead so a future
 # new kind is added by editing one place.
-_KNOWN_KINDS: frozenset[str] = frozenset({"feed", "metadata", "download", "index", "calibrate"})
+_KNOWN_KINDS: frozenset[str] = frozenset({"feed", "metadata", "download", "index", "calibrate", "check_url"})
 
 
 def _job_to_payload(job: Job) -> dict[str, object]:
@@ -82,6 +86,7 @@ def _job_to_payload(job: Job) -> dict[str, object]:
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
         "error": job.error,
+        "result": job.result,
     }
 
 

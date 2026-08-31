@@ -147,7 +147,7 @@ class _FakeJob:
         self,
         job_id: uuid.UUID,
         kind: str,
-        run_fn: Callable[[Callable[[float, str], None]], None] | None = None,
+        run_fn: Callable[[Callable[[float, str], None]], object] | None = None,
     ) -> None:
         self.id = job_id
         self.kind = kind
@@ -157,6 +157,7 @@ class _FakeJob:
         self.started_at: datetime | None = None
         self.finished_at: datetime | None = None
         self.error: str | None = None
+        self.result: dict[str, object] | None = None
         self._run_fn = run_fn
         self._thread: threading.Thread | None = None
         self._cancel_event = threading.Event()
@@ -186,7 +187,9 @@ class _FakeJob:
 
         try:
             assert self._run_fn is not None
-            self._run_fn(report)
+            run_result = self._run_fn(report)
+            if isinstance(run_result, dict):
+                self.result = run_result
         except Exception as exc:  # noqa: BLE001 -- fake runner mirrors JobRunner contract
             with self._lock:
                 if self.status != "cancelled":
@@ -215,12 +218,12 @@ class FakeJobRunner:
     def __init__(self) -> None:
         self._jobs: dict[uuid.UUID, _FakeJob] = {}
         self._active_by_kind: dict[str, _FakeJob] = {}
-        self.submit_calls: list[tuple[str, Callable[[Callable[[float, str], None]], None]]] = []
+        self.submit_calls: list[tuple[str, Callable[[Callable[[float, str], None]], object]]] = []
 
     async def submit(
         self,
         kind: str,
-        run_fn: Callable[[Callable[[float, str], None]], None],
+        run_fn: Callable[[Callable[[float, str], None]], object],
     ) -> _FakeJob:
         """Create a new _FakeJob; raise if an active job of the same kind exists."""
         self.submit_calls.append((kind, run_fn))
@@ -274,7 +277,7 @@ def _wait_for_terminal(job: _FakeJob, *, timeout_s: float = 2.0) -> _FakeJob:
 def _submit(
     runner: FakeJobRunner,
     kind: str,
-    run_fn: Callable[[Callable[[float, str], None]], None],
+    run_fn: Callable[[Callable[[float, str], None]], object],
 ) -> _FakeJob:
     """Drive an async FakeJobRunner.submit from a synchronous test."""
     import asyncio  # noqa: PLC0415 -- lazy: conftest stays dep-free at import

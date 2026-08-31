@@ -195,7 +195,7 @@ def test_get_jobs_events_sse_streams_progress_then_done(tmp_path: Path) -> None:
 
     def slow_reporting(report: Callable[[float, str], None]) -> None:
         report(0.5, "halfway")
-        time.sleep(0.05)
+        time.sleep(0.2)
         report(1.0, "done")
 
     job = _submit(runner, "feed", slow_reporting)
@@ -349,3 +349,70 @@ def test_static_vendor_htmx_json_enc_endpoint_serves_file(tmp_path: Path) -> Non
     assert 'htmx.defineExtension("json-enc"' in body or "htmx.defineExtension('json-enc'" in body
     assert "JSON.stringify" in body
     assert "application/json" in body
+
+
+def test_post_jobs_check_url_creates_job_with_kind_check_url(tmp_path: Path) -> None:
+    # Given an app with an empty JOB_FACTORIES and a registered slow check_url factory
+    client, _runner = _build_client_with_fake_runner(tmp_path)
+
+    def slow_check_url_run(report: Callable[[float, str], None]) -> dict[str, object]:
+        time.sleep(0.3)
+        report(1.0, "done")
+        return {"verdict": "matches", "score": 0.82}
+
+    JOB_FACTORIES["check_url"] = slow_check_url_run
+    try:
+        # When POSTing to /api/jobs with kind=check_url
+        response = client.post("/api/jobs", json={"kind": "check_url"})
+
+        # Then 201 + JSON body with kind=check_url and a non-terminal status
+        assert response.status_code == 201, (
+            f"check_url kind must be accepted, got {response.status_code}: {response.text}"
+        )
+        payload = response.json()
+        assert payload["kind"] == "check_url"
+        assert payload["status"] in ("queued", "running"), (
+            f"slow factory should leave the job non-terminal at submit time; got {payload['status']!r}"
+        )
+    finally:
+        JOB_FACTORIES.pop("check_url", None)
+
+
+def test_get_jobs_returns_check_url_job_with_result_field(
+    tmp_path: Path,
+) -> None:
+    # Given a real JobRunner with a check_url factory that returns a CheckResult dict
+    import asyncio  # noqa: PLC0415 -- lazy: test-only
+    import time as _time  # noqa: PLC0415 -- lazy: test-only
+
+    from taste_pipeline.web.jobs import JobRunner  # noqa: PLC0415 -- lazy: under test
+
+    runner = JobRunner(tmp_path)
+
+    def check_url_run(report: Callable[[float, str], None]) -> dict[str, object]:
+        report(1.0, "done")
+        return {
+            "verdict": "matches",
+            "score": 0.82,
+            "top_k": [{"score": 0.82, "library_track_id": "track_0.flac"}],
+            "threshold_keep": 0.75,
+            "threshold_skip": 0.25,
+            "human_readable": "Matches your taste (0.82 >= 0.75)",
+        }
+
+    job = asyncio.run(runner.submit("check_url", check_url_run))
+
+    # When waiting for terminal state
+    deadline = _time.monotonic() + 3.0
+    while _time.monotonic() < deadline:
+        current = runner.get(job.id)
+        if current.status in ("succeeded", "failed", "cancelled"):
+            break
+        _time.sleep(0.01)
+    final = runner.get(job.id)
+
+    # Then the result field is populated with the returned dict
+    assert final.status == "succeeded"
+    assert final.result is not None, "result field must be populated after a successful check_url job"
+    assert final.result["verdict"] == "matches"
+    assert final.result["score"] == 0.82

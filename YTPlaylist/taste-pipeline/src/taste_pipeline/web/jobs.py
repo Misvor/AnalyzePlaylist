@@ -20,7 +20,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 _TERMINAL_STATUSES: frozenset[JobStatus] = frozenset({"succeeded", "failed", "cancelled"})
@@ -42,6 +42,14 @@ class Job:
     ``succeeded``/``failed``/``cancelled``. The full state is persisted
     as JSON at ``<data_dir>/runs/<job_id>.json`` once the job reaches a
     terminal state.
+
+    The ``result`` field is populated by :class:`JobRunner` from the
+    return value of ``run_fn`` when the job completes successfully. It is
+    intended for pipeline passes that produce a payload the UI needs to
+    surface after the job finishes -- e.g. the ``check_url`` job kind
+    stashes a :class:`~taste_pipeline.check.CheckResult` here so the
+    dashboard can render the verdict without re-querying. Passes that do
+    not need to surface data leave it as ``None``.
     """
 
     id: uuid.UUID
@@ -52,6 +60,7 @@ class Job:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
+    result: dict[str, object] | None = None
 
 
 class JobRunner:
@@ -80,9 +89,14 @@ class JobRunner:
     async def submit(
         self,
         kind: str,
-        run_fn: Callable[[Callable[[float, str], None]], None],
+        run_fn: Callable[[Callable[[float, str], None]], dict[str, object] | None],
     ) -> Job:
         """Schedule ``run_fn`` for execution and return its :class:`Job` immediately.
+
+        ``run_fn`` may return a ``dict``; when it does (and the job
+        succeeds), the runner stashes it on ``Job.result`` so
+        ``GET /api/jobs/{id}`` surfaces it. ``None`` (or a non-dict) is
+        the "no payload" signal.
 
         Raises:
             JobConflictError: A job of the same ``kind`` is already queued
@@ -155,7 +169,7 @@ class JobRunner:
     def _run(
         self,
         job: Job,
-        run_fn: Callable[[Callable[[float, str], None]], None],
+        run_fn: Callable[[Callable[[float, str], None]], dict[str, object] | None],
         cancel_event: threading.Event,
     ) -> None:
         """Worker thread entry: transitions Job queued -> running -> terminal, then persists."""
@@ -175,8 +189,9 @@ class JobRunner:
                 job.progress = progress
                 job.log_lines.append(message)
 
+        run_result: object = None
         try:
-            run_fn(report)
+            run_result = run_fn(report)
         except Exception as exc:  # noqa: BLE001 — run_fn is an injected callable; any failure is a job failure
             with self._lock:
                 if job.status != "cancelled":
@@ -184,15 +199,27 @@ class JobRunner:
                     job.error = str(exc)
         finally:
             with self._lock:
-                if job.status not in _TERMINAL_STATUSES:
-                    if cancel_event.is_set():
-                        job.status = "cancelled"
-                    else:
-                        job.status = "succeeded"
-                        job.progress = 1.0
-                if job.finished_at is None:
-                    job.finished_at = datetime.now(UTC)
-                self._persist(job)
+                self._finalize(job, cancel_event, run_result)
+
+    def _finalize(self, job: Job, cancel_event: threading.Event, run_result: object) -> None:
+        """Apply terminal-state transitions + result stashing under the lock; then persist.
+
+        Extracted from :meth:`_run` so the worker-thread entry stays under
+        the complexity threshold. ``run_result`` is ``run_fn``'s return
+        value: a dict stashes the job's payload (``check_url`` returns a
+        ``CheckResult``); a non-dict or ``None`` is the "no payload" signal.
+        """
+        if job.status not in _TERMINAL_STATUSES:
+            if cancel_event.is_set():
+                job.status = "cancelled"
+            else:
+                job.status = "succeeded"
+                job.progress = 1.0
+        if job.status == "succeeded" and isinstance(run_result, dict):
+            job.result = cast("dict[str, object]", run_result)
+        if job.finished_at is None:
+            job.finished_at = datetime.now(UTC)
+        self._persist(job)
 
     def _persist(self, job: Job) -> None:
         """Atomically write the Job's full state as JSON under ``<data_dir>/runs``."""
@@ -206,6 +233,7 @@ class JobRunner:
             "started_at": job.started_at.isoformat() if job.started_at else None,
             "finished_at": job.finished_at.isoformat() if job.finished_at else None,
             "error": job.error,
+            "result": job.result,
         }
         tmp_path = record_path.with_suffix(".json.tmp")
         _ = tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

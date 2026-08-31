@@ -60,9 +60,9 @@ def test_get_root_returns_base_shell_with_nav_and_status_bar(tmp_path: Path) -> 
     assert "Taste Pipeline" in body
     # Semantic top action bar
     assert 'id="action-bar"' in body
-    # Main nav element with all 4 expected nav IDs (Dashboard / Triage / Index / Settings)
+    # Main nav element with all 5 expected nav IDs (Dashboard / Triage / Check / Index / Settings)
     assert 'id="main-nav"' in body
-    for nav_id in ("nav-dashboard", "nav-triage", "nav-index", "nav-settings"):
+    for nav_id in ("nav-dashboard", "nav-triage", "nav-check", "nav-index", "nav-settings"):
         assert nav_id in body, f"missing nav id: {nav_id}"
     # Main content block
     assert 'id="content"' in body

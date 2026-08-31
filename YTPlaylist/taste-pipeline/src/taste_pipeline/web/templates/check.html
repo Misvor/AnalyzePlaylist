@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+
+{% block title %}Check Track — Taste Pipeline{% endblock %}
+
+{% block content %}
+  <h1>Check Track</h1>
+
+  <p id="check-intro">
+    Compare a single track against your like-library. Either drag an audio file
+    into the box below, or paste a YouTube URL and let the pipeline fetch +
+    download + embed it.
+  </p>
+
+  <section id="check-file-section">
+    <h2>1. Drag-and-drop audio file</h2>
+    <div id="drop-zone" class="drop-zone">
+      <span id="drop-zone-text">Drop audio file here, or click to select:</span>
+      <input type="file" id="file-input" accept=".flac,.mp3,.wav,.opus,.m4a,.ogg">
+    </div>
+    <div id="file-status" class="badge" hidden></div>
+  </section>
+
+  <section id="check-url-section">
+    <h2>2. YouTube URL</h2>
+    <input type="text" id="url-input" class="url-input"
+           placeholder="https://www.youtube.com/watch?v=...">
+    <button id="check-url-btn" type="button">Check URL</button>
+    <div id="url-status" class="badge" hidden></div>
+    <div id="url-progress" class="progress-bar" hidden>
+      <span id="url-progress-fill" class="fill" style="width: 0%;"></span>
+    </div>
+    <div id="url-log" class="check-log" hidden></div>
+  </section>
+
+  <section id="check-result-section">
+    <h2>Result</h2>
+    <div id="check-result" class="check-result" data-verdict="none">
+      <span id="check-result-verdict" class="check-result-verdict"></span>
+      <span id="check-result-score" class="check-result-score"></span>
+      <div id="check-result-summary" class="check-result-summary"></div>
+      <table id="check-result-top-k" class="check-result-top-k" hidden>
+        <thead>
+          <tr><th>similarity</th><th>library track</th></tr>
+        </thead>
+        <tbody id="check-result-top-k-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <script>
+    // Two flows: (a) drag-drop / file picker -> POST /api/check/file
+    // (synchronous JSON response), (b) URL -> POST /api/check/url (job
+    // runner) -> SSE /api/jobs/{id}/events for progress -> GET /api/jobs/{id}
+    // for the final CheckResult. Both render into #check-result.
+    (function () {
+      function setVerdictBadge(verdict, score, summary, topK) {
+        var root = document.getElementById('check-result');
+        var vEl = document.getElementById('check-result-verdict');
+        var sEl = document.getElementById('check-result-score');
+        var sumEl = document.getElementById('check-result-summary');
+        var tableEl = document.getElementById('check-result-top-k');
+        var bodyEl = document.getElementById('check-result-top-k-body');
+        if (root) root.setAttribute('data-verdict', verdict || 'none');
+        if (vEl) vEl.textContent = verdict ? verdict.replace('_', ' ') : '';
+        if (sEl) sEl.textContent = score != null ? ' (score ' + Number(score).toFixed(2) + ')' : '';
+        if (sumEl) sumEl.textContent = summary || '';
+        if (tableEl && bodyEl) {
+          if (Array.isArray(topK) && topK.length > 0) {
+            bodyEl.innerHTML = '';
+            for (var i = 0; i < topK.length; i++) {
+              var row = document.createElement('tr');
+              var sCell = document.createElement('td');
+              var idCell = document.createElement('td');
+              sCell.textContent = Number(topK[i].score || 0).toFixed(2);
+              idCell.textContent = topK[i].library_track_id || '';
+              row.appendChild(sCell);
+              row.appendChild(idCell);
+              bodyEl.appendChild(row);
+            }
+            tableEl.hidden = false;
+          } else {
+            tableEl.hidden = true;
+          }
+        }
+      }
+
+      function showBadge(id, text, status) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = text;
+        el.setAttribute('data-status', status || 'running');
+        el.hidden = false;
+      }
+
+      function hideBadge(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.hidden = true;
+      }
+
+      // Helper: convert a File object to a base64 string (no data: prefix).
+      function fileToBase64(file) {
+        return new Promise(function (resolve, reject) {
+          var reader = new FileReader();
+          reader.onerror = function () { reject(reader.error || new Error('FileReader failed')); };
+          reader.onload = function () {
+            var result = reader.result || '';
+            // Strip the data:...;base64, prefix if present.
+            var comma = result.indexOf(',');
+            resolve(comma >= 0 ? result.slice(comma + 1) : result);
+          };
+          reader.readAsDataURL(file);
+        });
+      }
+
+      // Helper: post a JSON body, surface a clear error message on non-2xx.
+      async function postJson(url, body) {
+        var resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+          var detail = resp.status + ' ' + resp.statusText;
+          try {
+            var errPayload = await resp.json();
+            if (errPayload && errPayload.detail) detail = String(errPayload.detail);
+          } catch (e) { /* ignore JSON parse errors on error body */ }
+          throw new Error(detail);
+        }
+        return await resp.json();
+      }
+
+      async function runFileCheck(file) {
+        hideBadge('url-status');
+        hideBadge('url-progress');
+        hideBadge('url-log');
+        showBadge('file-status', 'embedding ' + file.name + '...', 'running');
+        setVerdictBadge('none');
+        try {
+          var b64 = await fileToBase64(file);
+          var result = await postJson('/api/check/file', {
+            filename: file.name,
+            content_b64: b64,
+          });
+          showBadge('file-status', 'done', 'succeeded');
+          setVerdictBadge(result.verdict, result.score, result.human_readable, result.top_k);
+        } catch (err) {
+          showBadge('file-status', 'failed: ' + err.message, 'failed');
+          setVerdictBadge('error');
+        }
+      }
+
+      // Drag-and-drop wiring.
+      var dropZone = document.getElementById('drop-zone');
+      var fileInput = document.getElementById('file-input');
+      if (dropZone && fileInput) {
+        dropZone.addEventListener('click', function () { fileInput.click(); });
+        fileInput.addEventListener('change', function () {
+          if (fileInput.files && fileInput.files[0]) runFileCheck(fileInput.files[0]);
+        });
+        ['dragenter', 'dragover'].forEach(function (evt) {
+          dropZone.addEventListener(evt, function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.add('drop-zone-active');
+          });
+        });
+        ['dragleave', 'drop'].forEach(function (evt) {
+          dropZone.addEventListener(evt, function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('drop-zone-active');
+          });
+        });
+        dropZone.addEventListener('drop', function (e) {
+          var dt = e.dataTransfer;
+          if (dt && dt.files && dt.files[0]) runFileCheck(dt.files[0]);
+        });
+      }
+
+      // URL check wiring.
+      var urlInput = document.getElementById('url-input');
+      var checkBtn = document.getElementById('check-url-btn');
+      var progressEl = document.getElementById('url-progress');
+      var progressFill = document.getElementById('url-progress-fill');
+      var logEl = document.getElementById('url-log');
+
+      function setProgress(value, message) {
+        if (progressEl) progressEl.hidden = false;
+        if (progressFill) progressFill.style.width = (value * 100).toFixed(1) + '%';
+        if (message && logEl) {
+          logEl.hidden = false;
+          var line = document.createElement('div');
+          line.textContent = '[' + (value * 100).toFixed(0) + '%] ' + message;
+          logEl.appendChild(line);
+        }
+      }
+
+      function attachJobStream(jobId) {
+        var es = new EventSource('/api/jobs/' + jobId + '/events');
+        es.addEventListener('progress', function (evt) {
+          try {
+            var data = JSON.parse(evt.data);
+            setProgress(data.progress || 0, data.message || '');
+          } catch (e) { /* malformed event payload: ignore */ }
+        });
+        es.addEventListener('done', function () {
+          es.close();
+          // Fetch the final job to read .result.
+          fetch('/api/jobs/' + jobId).then(function (r) { return r.json(); }).then(function (job) {
+            if (job && job.result) {
+              showBadge('url-status', 'done', 'succeeded');
+              setVerdictBadge(job.result.verdict, job.result.score, job.result.human_readable, job.result.top_k);
+            } else if (job && job.status === 'failed') {
+              showBadge('url-status', 'failed: ' + (job.error || 'unknown'), 'failed');
+              setVerdictBadge('error');
+            } else {
+              showBadge('url-status', 'finished with no result', 'failed');
+              setVerdictBadge('error');
+            }
+          }).catch(function (err) {
+            showBadge('url-status', 'failed: ' + err.message, 'failed');
+            setVerdictBadge('error');
+          });
+        });
+      }
+
+      if (checkBtn && urlInput) {
+        checkBtn.addEventListener('click', function () {
+          var url = (urlInput.value || '').trim();
+          if (!url) {
+            showBadge('url-status', 'enter a URL first', 'failed');
+            return;
+          }
+          hideBadge('file-status');
+          if (logEl) { logEl.innerHTML = ''; logEl.hidden = true; }
+          showBadge('url-status', 'submitting...', 'running');
+          setProgress(0, 'submitting');
+          postJson('/api/check/url', { url: url }).then(function (job) {
+            showBadge('url-status', 'job queued (' + job.kind + ')', 'running');
+            attachJobStream(job.id);
+          }).catch(function (err) {
+            showBadge('url-status', 'failed: ' + err.message, 'failed');
+            setVerdictBadge('error');
+          });
+        });
+      }
+    })();
+  </script>
+{% endblock %}

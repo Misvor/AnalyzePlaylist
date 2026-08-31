@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from taste_pipeline.web.api import router as api_router
 from taste_pipeline.web.jobs import JobRunner
+from taste_pipeline.web.routes_check import router as check_router
 from taste_pipeline.web.routes_index import build_index_status
 from taste_pipeline.web.routes_index import router as index_router
 from taste_pipeline.web.routes_jobs import router as jobs_router
@@ -67,6 +68,7 @@ def create_app(config: Config, *, config_path: Path | None = None) -> FastAPI:
     app.include_router(jobs_router)
     app.include_router(settings_router)
     app.include_router(triage_router)
+    app.include_router(check_router)
     app.state.runner = JobRunner(config.data_dir)
     app.state.templates = templates
     # env.globals is the Jinja2 seam that makes config values reachable from

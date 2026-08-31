@@ -205,3 +205,79 @@ tr:nth-child(even) td {
 .badge[data-status="cancelled"] {
   background: #ddd;
 }
+
+/* ── Check Track page (drag-drop + URL input + result panel) ─────── */
+.drop-zone {
+  border: 2px dashed #999;
+  padding: 20px;
+  text-align: center;
+  background: #fff;
+  cursor: pointer;
+}
+
+.drop-zone-active {
+  background: #eee;
+  border-color: #5a8;
+}
+
+.drop-zone input[type="file"] {
+  display: none;
+}
+
+.url-input {
+  width: 420px;
+  margin-right: 6px;
+}
+
+.check-log {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border: 1px solid #ccc;
+  background: #fff;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.check-result {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid #ccc;
+  background: #fff;
+}
+
+.check-result[data-verdict="matches"] {
+  border-color: #5a8;
+  background: #efe;
+}
+
+.check-result[data-verdict="uncertain"] {
+  border-color: #da4;
+  background: #ffd;
+}
+
+.check-result[data-verdict="doesn't_match"] {
+  border-color: #c44;
+  background: #fee;
+}
+
+.check-result[data-verdict="no_library"],
+.check-result[data-verdict="error"] {
+  border-color: #999;
+  background: #eee;
+}
+
+.check-result-verdict {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.check-result-score {
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.check-result-top-k {
+  margin-top: 8px;
+  width: auto;
+}

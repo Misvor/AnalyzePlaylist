@@ -50,12 +50,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from yt_dlp import YoutubeDL
+
 if TYPE_CHECKING:
     from taste_pipeline.config import Config
     from taste_pipeline.metadata import TrackMetadata
     from taste_pipeline.state import StateStore
 
-RunFn = Callable[[Callable[[float, str], None]], None]
+RunFn = Callable[[Callable[[float, str], None]], "dict[str, object] | None"]
 
 
 def make_feed_factory(config: Config, state: StateStore) -> RunFn:
@@ -187,6 +189,79 @@ def make_calibrate_factory(config: Config, state: StateStore) -> RunFn:
         # decisions happen later in the download/triage flow.
         _ = state
         _ = calibrate.run_calibration(config, report)
+
+    return run_fn
+
+
+def make_check_url_factory(config: Config, state: StateStore, url: str) -> RunFn:
+    """Build a ``check_url`` factory: fetch → metadata → download → embed → compare.
+
+    The full pipeline runs inside one ``run_fn`` so the user gets a single
+    background job (and SSE progress stream) for the whole flow. Returns a
+    :class:`CheckResult` dict via the ``run_fn`` return value; the runner
+    stashes it on ``job.result`` so ``GET /api/jobs/{id}`` surfaces it.
+
+    Pipeline stages:
+
+    1. Extract the ``video_id`` from the URL via yt-dlp (no download).
+    2. Fetch the metadata for that video (pass-B).
+    3. Run :func:`detect.is_song`; bail with a verdict if not a song.
+    4. Download the FLAC into ``<data_dir>/inbox`` (pass-C).
+    5. Call :func:`taste_pipeline.check.check_audio_file` for the embed + compare.
+    6. Return the :class:`CheckResult` as a plain dict.
+
+    The check pass itself loads calibration thresholds via
+    :func:`taste_pipeline.calibrate.load_thresholds` (no manual scan --
+    the check factory does not need to re-derive thresholds). All
+    pipeline modules are imported lazily inside the closure so a test
+    that ``monkeypatch.setattr``s ``taste_pipeline.metadata.fetch_metadata``,
+    ``taste_pipeline.download.download_songs``,
+    ``taste_pipeline.detect.is_song``, or
+    ``taste_pipeline.check.check_audio_file`` observes the patches.
+    """
+    from taste_pipeline.detect import is_song  # noqa: PLC0415 -- lazy: monkey-patch works
+
+    def run_fn(report: Callable[[float, str], None]) -> dict[str, object]:
+        from taste_pipeline import check, download, metadata  # noqa: PLC0415 -- lazy re-fetch
+
+        report(0.0, "parsing URL")
+        with YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+        video_id = str(info.get("id") or "")
+        if not video_id:
+            message = f"could not parse a video id from {url!r}"
+            raise ValueError(message)
+
+        report(0.1, "fetching metadata")
+        metas = metadata.fetch_metadata([video_id], config, state)
+        if not metas:
+            message = f"no metadata returned for {video_id}"
+            raise ValueError(message)
+        track_meta = metas[0]
+
+        report(0.3, "checking if it's a song")
+        is_song_result = is_song(track_meta)[0]
+        if not is_song_result:
+            message = f"{video_id} is not a song (skipping download)"
+            raise ValueError(message)
+
+        report(0.5, "downloading")
+        downloaded = download.download_songs([track_meta], config, state)
+        if not downloaded:
+            message = f"download produced no file for {video_id}"
+            raise ValueError(message)
+
+        report(0.8, "computing embedding and comparing")
+        verdict = check.check_audio_file(downloaded[0].audio_path, config)
+        report(1.0, "complete")
+        return {
+            "verdict": verdict.verdict,
+            "score": verdict.score,
+            "top_k": [{"score": score, "library_track_id": track_id} for score, track_id in verdict.top_k],
+            "threshold_keep": verdict.threshold_keep,
+            "threshold_skip": verdict.threshold_skip,
+            "human_readable": verdict.human_readable,
+        }
 
     return run_fn
 
