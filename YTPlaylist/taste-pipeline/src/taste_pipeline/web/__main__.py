@@ -88,7 +88,7 @@ def open_directory_dialog() -> str | None:
     if not webview.windows:
         return None
     result = webview.windows[0].create_file_dialog(
-        webview.FOLDER_DIALOG,  # pyright: ignore[reportArgumentType]
+        webview.FileDialog.FOLDER,
         directory=str(Path.home()),
         allow_multiple=False,
     )
@@ -105,7 +105,7 @@ def open_file_dialog() -> str | None:
     if not webview.windows:
         return None
     result = webview.windows[0].create_file_dialog(
-        webview.OPEN_DIALOG,  # pyright: ignore[reportArgumentType]
+        webview.FileDialog.OPEN,
         directory=str(Path.home()),
         allow_multiple=False,
         file_types=("All files (*.*)",),
