@@ -13,7 +13,7 @@ htmx.defineExtension("json-enc", {
       evt.detail.headers["Content-Type"] = "application/json";
     }
   },
-  encodeParametersForBody: function (xhr, parameters, elt) {
+  encodeParameters: function (xhr, parameters, elt) {
     return JSON.stringify(parameters);
   },
 });

@@ -301,32 +301,70 @@ async def settings_page(request: Request) -> Response:
 # pattern from routes_jobs.py).
 
 
+def _coerce_int(raw: object) -> int | None:
+    """Coerce ``raw`` to ``int`` (accepting numeric strings); ``None`` on failure.
+
+    Browsers submit form fields as strings (``<input value="30">`` → ``"30"``)
+    even when the input type is ``"number"`` because the user's typed text
+    is a string until JS or the server coerces it. The endpoint accepts
+    numeric strings as a courtesy -- without this, the settings page
+    round-trip (type in input → save → reload) breaks because the server
+    rejects the string. ``bool`` is explicitly rejected (Python treats
+    ``True`` as ``int``, which would silently coerce).
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_float(raw: object) -> float | None:
+    """Counterpart of :func:`_coerce_int` for ``float``."""
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+    return None
+
+
 def _validate_int_field(name: str, raw: object, *, minimum: int | None = None) -> int:
     """Coerce ``raw`` to int (rejecting bool); raise on validation error."""
-    if isinstance(raw, bool) or not isinstance(raw, int):
+    coerced = _coerce_int(raw)
+    if coerced is None:
         message = f"{name}: must be an int (got {type(raw).__name__})"
         raise _FieldValidationError(message)
-    if minimum is not None and raw < minimum:
-        message = f"{name}: must be >= {minimum} (got {raw})"
+    if minimum is not None and coerced < minimum:
+        message = f"{name}: must be >= {minimum} (got {coerced})"
         raise _FieldValidationError(message)
-    return raw
+    return coerced
 
 
 def _validate_float_field(
     name: str, raw: object, *, minimum: float | None = None, maximum: float | None = None
 ) -> float:
     """Coerce ``raw`` to float (rejecting bool); apply optional bounds."""
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+    coerced = _coerce_float(raw)
+    if coerced is None:
         message = f"{name}: must be a number (got {type(raw).__name__})"
         raise _FieldValidationError(message)
-    result = float(raw)
-    if minimum is not None and result < minimum:
-        message = f"{name}: must be >= {minimum} (got {result})"
+    if minimum is not None and coerced < minimum:
+        message = f"{name}: must be >= {minimum} (got {coerced})"
         raise _FieldValidationError(message)
-    if maximum is not None and result > maximum:
-        message = f"{name}: must be <= {maximum} (got {result})"
+    if maximum is not None and coerced > maximum:
+        message = f"{name}: must be <= {maximum} (got {coerced})"
         raise _FieldValidationError(message)
-    return result
+    return coerced
 
 
 def _validate_optional_float_field(
@@ -336,8 +374,18 @@ def _validate_optional_float_field(
     minimum: float | None = None,
     maximum: float | None = None,
 ) -> float | None:
-    """Coerce ``raw`` to float or None; None passes through."""
-    if raw is None:
+    """Coerce ``raw`` to float or None; None, ``""``, and ``"null"`` pass through.
+
+    Three inputs map to "no value":
+    - ``None`` -- a genuine JSON null (curl with json=null)
+    - ``""`` -- an empty form input (browser form serialization)
+    - ``"null"`` -- the literal string "null" (4 chars), which some htmx /
+      browser / proxy combinations produce when an empty number input is
+      round-tripped through the json-enc extension. We accept all three so
+      the settings page round-trip works regardless of which form the
+      submission takes.
+    """
+    if raw is None or raw in {"", "null"}:
         return None
     return _validate_float_field(name, raw, minimum=minimum, maximum=maximum)
 
@@ -605,16 +653,32 @@ def _render_toml(payload: dict[str, object]) -> str:
     same canonical form. Python's stdlib does not ship a TOML writer
     (only a reader), and the project deliberately avoids pulling in
     ``tomli_w`` for one endpoint.
+
+    None values are OMITTED from the output. TOML has no native null,
+    and the prior placeholder (``"__unset__"``) caused the next
+    ``load_config`` to fail with "must be a number" (a string can't
+    substitute for a float). Omitting the key is safe because
+    ``Config.__init__`` applies each field's default when the TOML is
+    missing it — and the optional-float defaults are all ``None``.
     """
     lines: list[str] = []
     for key in sorted(payload):
         value = payload[key]
+        if value is None:
+            # TOML has no null; dropping the key is the only representation
+            # that round-trips. The reader's defaults fill the field.
+            continue
         lines.append(f"{key} = {_toml_literal(value)}")
     return "\n".join(lines) + "\n"
 
 
 def _toml_literal(value: object) -> str:
-    """Render a single TOML scalar literal: int / float / str / bool / None."""
+    """Render a single TOML scalar literal: int / float / str / bool.
+
+    ``None`` is handled by :func:`_render_toml` (the key is omitted) so
+    this helper never sees ``None`` -- the defensive ``raise TypeError``
+    below catches any future field type we don't support.
+    """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
@@ -624,11 +688,6 @@ def _toml_literal(value: object) -> str:
         return repr(value)
     if isinstance(value, str):
         return json.dumps(value)
-    if value is None:
-        # JSON null isn't valid TOML; write a single-line comment so the
-        # file remains parseable (the field will need to be set to a
-        # real value before loading again).
-        return '"__unset__"  # TOML has no null; unset via the form'
     message = f"unsupported TOML literal type: {type(value).__name__}"
     raise TypeError(message)
 

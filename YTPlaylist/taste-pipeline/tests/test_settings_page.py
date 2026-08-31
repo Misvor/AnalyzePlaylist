@@ -697,6 +697,35 @@ def test_post_config_rejects_skip_threshold_gte_keep_threshold(tmp_path: Path) -
     assert "keep_threshold" in detail, f"error detail should name keep_threshold; got {detail!r}"
 
 
+def test_post_config_accepts_string_null_for_optional_float(tmp_path: Path) -> None:
+    """Optional float fields accept ``None``, ``""``, and ``"null"`` as None.
+
+    Locks the contract that round-trips through the settings form work
+    regardless of how the submission serializes an empty number input:
+    - None (genuine JSON null from curl)
+    - ``""`` (empty form input)
+    - ``"null"`` (literal string the htmx json-enc round-trip sometimes produces
+      for empty number inputs)
+
+    All three must map to the field's None value so the user's typing is
+    not lost. The validators must NOT reject any of them with 422.
+    """
+    client = _client(tmp_path)
+    for nullish in (None, "", "null"):
+        # Given the app has skip_threshold unset (its default state)
+        response = client.post("/api/config", json={"skip_threshold": nullish})
+
+        # Then 200 and skip_threshold is null in the response
+        assert response.status_code == 200, (
+            f"skip_threshold={nullish!r} should be accepted as None; "
+            f"got status={response.status_code} body={response.text!r}"
+        )
+        payload = response.json()
+        assert payload["skip_threshold"] is None, (
+            f"skip_threshold={nullish!r} should round-trip to None; got {payload['skip_threshold']!r}"
+        )
+
+
 # ── Editable path / network fields (restart required) ─────────────────
 
 

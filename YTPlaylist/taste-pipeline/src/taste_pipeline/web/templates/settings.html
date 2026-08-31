@@ -42,7 +42,7 @@
   <form id="settings-form"
         {% if not config_path %}data-disabled="true"{% endif %}
         hx-post="/api/config" hx-ext="json-enc"
-        hx-vals='js:collectEditableFields()'
+        hx-vals="js:{...collectEditableFields()}"
         hx-target="#settings-result" hx-swap="innerHTML">
     <fieldset class="settings-group">
       <legend>Taste profile</legend>
@@ -56,7 +56,7 @@
               <td class="field-name"><label for="field-{{ row.name }}">{{ row.name }}</label></td>
               <td class="field-input">
                 {% if row.kind == "none" %}
-                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" placeholder="null" value="" />
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="number" step="any" placeholder="null (float)" value="" />
                 {% elif row.kind == "bool" %}
                   <select id="field-{{ row.name }}" name="{{ row.name }}">
                     <option value="true" {% if row.value %}selected{% endif %}>true</option>
@@ -181,8 +181,12 @@
           if (!el.name) continue;
           var raw = el.value;
           if (el.type === 'number') {
-            var n = Number(raw);
-            out[el.name] = isNaN(n) ? raw : n;
+            if (raw === '') {
+              out[el.name] = null;
+            } else {
+              var n = Number(raw);
+              out[el.name] = isNaN(n) ? raw : n;
+            }
           } else if (el.tagName === 'SELECT') {
             if (raw === 'true' || raw === 'false') {
               out[el.name] = (raw === 'true');
