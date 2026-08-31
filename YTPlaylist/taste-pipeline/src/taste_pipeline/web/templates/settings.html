@@ -153,6 +153,9 @@
     </fieldset>
 
     <div id="settings-actions">
+      <span id="settings-dirty-indicator" class="badge" data-status="failed" hidden>
+        Unsaved changes — click Save or you'll lose them on navigation.
+      </span>
       <button id="settings-save" type="submit" class="run-button"
               {% if not config_path %}disabled{% endif %}>Save settings</button>
     </div>
@@ -177,10 +180,6 @@
           var el = inputs[i];
           if (!el.name) continue;
           var raw = el.value;
-          // Numeric inputs come back as strings; the backend accepts
-          // both string and numeric JSON, but normalize to the right
-          // shape so the server-side coercion matches what the form
-          // claimed.
           if (el.type === 'number') {
             var n = Number(raw);
             out[el.name] = isNaN(n) ? raw : n;
@@ -191,8 +190,6 @@
               out[el.name] = raw;
             }
           } else if (raw === '') {
-            // Empty input on a previously-None threshold field -> the
-            // user wants the threshold cleared (None on the wire).
             out[el.name] = null;
           } else {
             out[el.name] = raw;
@@ -201,51 +198,66 @@
         return out;
       };
 
-      // Surface validation errors from POST /api/config as a visible
-      // badge inside #settings-result. The server returns 422 with a
-      // {detail: "..."} body; htmx triggers htmx:responseError, and
-      // the handler below writes the detail into the result div.
-      document.body.addEventListener('htmx:responseError', function (evt) {
-        var xhr = evt && evt.detail && evt.detail.xhr;
-        var target = evt && evt.detail && evt.detail.target;
-        if (!xhr || !target) return;
-        if (target.id !== 'settings-result') return;
-        if (xhr.status !== 422 && xhr.status !== 409) return;
-        try {
-          var body = JSON.parse(xhr.responseText);
-          var detail = body && body.detail ? body.detail : ('HTTP ' + xhr.status);
-        } catch (e) {
-          var detail = 'HTTP ' + xhr.status;
+      // ── Dirty-form guard ─────────────────────────────────────────
+      // Without this guard, a user who edits a path/network field and
+      // navigates away silently loses their typing because GET /settings
+      // re-reads from config.toml on every render.
+      var formDirty = false;
+      function markDirty() {
+        if (formDirty) return;
+        formDirty = true;
+        var saveBtn = document.getElementById('settings-save');
+        if (saveBtn) saveBtn.textContent = 'Save settings *';
+        var dirtyIndicator = document.getElementById('settings-dirty-indicator');
+        if (dirtyIndicator) dirtyIndicator.hidden = false;
+      }
+      function markClean() {
+        formDirty = false;
+        var saveBtn = document.getElementById('settings-save');
+        if (saveBtn) saveBtn.textContent = 'Save settings';
+        var dirtyIndicator = document.getElementById('settings-dirty-indicator');
+        if (dirtyIndicator) dirtyIndicator.hidden = true;
+      }
+      function attachDirtyTracking() {
+        var fields = document.querySelectorAll(
+          '#settings-form .settings-editable input, #settings-form .settings-editable select'
+        );
+        for (var i = 0; i < fields.length; i++) {
+          fields[i].addEventListener('input', markDirty);
+          fields[i].addEventListener('change', markDirty);
         }
-        target.innerHTML = '<div class="badge" data-status="failed">Error: ' +
-          String(detail).replace(/[<>&]/g, function (c) {
-            return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c];
-          }) +
-          '</div>';
-      });
-
-      document.body.addEventListener('htmx:afterRequest', function (evt) {
-        var xhr = evt && evt.detail && evt.detail.xhr;
-        var target = evt && evt.detail && evt.detail.target;
-        if (!xhr || !target) return;
-        if (target.id !== 'settings-result') return;
-        if (xhr.status >= 200 && xhr.status < 300) {
-          target.innerHTML = '<div class="badge" data-status="succeeded">Settings saved.</div>';
-          // Reload the page so the banner re-renders with the new
-          // unapplied set (file changed, running config unchanged).
-          // A partial DOM update would need to re-run the banner
-          // detection server-side; a full reload is cheaper and
-          // idempotent.
-          window.setTimeout(function () { window.location.reload(); }, 600);
+      }
+      window.addEventListener('beforeunload', function (event) {
+        if (formDirty) {
+          event.preventDefault();
+          event.returnValue = '';
+          return '';
         }
       });
+      function interceptNavClicks(event) {
+        if (!formDirty) return;
+        var target = event.target;
+        while (target && target !== document.body) {
+          if (target.tagName === 'A' && target.href && target.origin === window.location.origin) {
+            event.preventDefault();
+            var confirmed = window.confirm(
+              'You have unsaved changes. Leave anyway? Your edits will be lost.'
+            );
+            if (confirmed) {
+              formDirty = false;
+              window.location.href = target.href;
+            }
+            return;
+          }
+          target = target.parentNode;
+        }
+      }
+      document.addEventListener('click', interceptNavClicks, true);
 
-      // Browse buttons: open the host OS native dialog (pywebview
-      // exposes `open_directory_dialog` / `open_file_dialog` via
-      // `window.pywebview.api`). In browser mode, fall back to a hidden
-      // <input type="file"> -- browsers do not expose absolute paths,
-      // so the picked NAME goes into the input and the user prepends
-      // the parent path manually. The desktop path is the happy one.
+      // ── Browse buttons (path / file pickers) ────────────────────
+      // Desktop (pywebview) calls window.pywebview.api.open_*_dialog
+      // for absolute paths. Browser fallback uses webkitdirectory and
+      // gives only the picked NAME (browsers hide absolute paths).
       function attachBrowseHandlers() {
         var btns = document.querySelectorAll('button.browse-btn');
         for (var i = 0; i < btns.length; i++) {
@@ -298,9 +310,6 @@
           fi.addEventListener('change', function () {
             var file = fi.files && fi.files[0];
             if (!file) { done(null); return; }
-            // Browsers hide absolute paths. Return the picked NAME
-            // (or directory portion of webkitRelativePath). The user
-            // prepends the parent path manually.
             var relative = file.webkitRelativePath || file.name;
             if (kind === 'directory') {
               var slash = relative.indexOf('/');
@@ -311,7 +320,6 @@
             }
             done(relative);
           });
-          // Best-effort cancel handler; not all browsers fire it.
           fi.addEventListener('cancel', function () { done(null); });
           fi.click();
           // Timeout fallback if neither change nor cancel fires (e.g.
@@ -321,8 +329,46 @@
           }, 30000);
         });
       }
-      attachBrowseHandlers();
-      document.body.addEventListener('htmx:afterSwap', attachBrowseHandlers);
+
+      // ── Form submit (POST /api/config) error / success handling ───
+      document.body.addEventListener('htmx:responseError', function (evt) {
+        var xhr = evt && evt.detail && evt.detail.xhr;
+        var target = evt && evt.detail && evt.detail.target;
+        if (!xhr || !target) return;
+        if (target.id !== 'settings-result') return;
+        if (xhr.status !== 422 && xhr.status !== 409) return;
+        var detail = 'HTTP ' + xhr.status;
+        try {
+          var body = JSON.parse(xhr.responseText);
+          if (body && body.detail) detail = body.detail;
+        } catch (e) { /* keep default detail */ }
+        target.innerHTML = '<div class="badge" data-status="failed">Error: ' +
+          String(detail).replace(/[<>&]/g, function (c) {
+            return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c];
+          }) +
+          '</div>';
+      });
+
+      document.body.addEventListener('htmx:afterRequest', function (evt) {
+        var xhr = evt && evt.detail && evt.detail.xhr;
+        var target = evt && evt.detail && evt.detail.target;
+        if (!xhr || !target) return;
+        if (target.id !== 'settings-result') return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          target.innerHTML = '<div class="badge" data-status="succeeded">Settings saved.</div>';
+          // Clear dirty BEFORE the reload so beforeunload doesn't fire.
+          markClean();
+          window.setTimeout(function () { window.location.reload(); }, 600);
+        }
+      });
+
+      // ── Initial attach + htmx:afterSwap re-attach ────────────────
+      function reattachAll() {
+        attachDirtyTracking();
+        attachBrowseHandlers();
+      }
+      reattachAll();
+      document.body.addEventListener('htmx:afterSwap', reattachAll);
     })();
   </script>
 {% endblock %}

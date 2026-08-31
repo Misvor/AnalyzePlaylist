@@ -444,6 +444,41 @@ def test_get_settings_includes_pick_path_javascript_handler(tmp_path: Path) -> N
     )
 
 
+def test_get_settings_renders_dirty_indicator_badge(tmp_path: Path) -> None:
+    # Given the settings page rendered
+    client = _client(tmp_path)
+
+    # When requesting it
+    response = client.get("/settings")
+
+    # Then the page contains a hidden dirty-form badge that flips
+    # visible on input. Without this badge a user who typed path
+    # changes and navigated away would silently lose their edits
+    # because GET /settings re-reads from config.toml.
+    assert response.status_code == 200
+    body = response.text
+    assert 'id="settings-dirty-indicator"' in body, (
+        "settings page missing the unsaved-changes indicator badge"
+    )
+    assert "hidden" in body, "dirty indicator badge should start hidden"
+
+
+def test_settings_page_includes_beforeunload_guard_for_unsaved_changes(tmp_path: Path) -> None:
+    # Given the settings page rendered
+    client = _client(tmp_path)
+
+    # When requesting it
+    response = client.get("/settings")
+
+    # Then the inline JS includes the beforeunload handler that
+    # prompts the user when there are unsaved changes. Without this
+    # handler a user could lose path edits by switching tabs.
+    assert response.status_code == 200
+    body = response.text
+    assert "beforeunload" in body, "settings form missing beforeunload guard for unsaved changes"
+    assert "formDirty" in body, "settings form missing the formDirty flag tracking unsaved state"
+
+
 def test_get_settings_shows_unapplied_changes_banner_when_path_differs(tmp_path: Path) -> None:
     # Given a tmp config.toml that DIFFERS from the running snapshot:
     # the file on disk has like_library_dir = a NEW directory, but
