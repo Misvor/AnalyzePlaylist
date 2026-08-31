@@ -5,28 +5,181 @@
 {% block content %}
   <h1>Settings</h1>
 
-  <p id="settings-readonly-note">
-    Read-only display. Edit <code>config.toml</code> and restart to change settings.
-  </p>
+  {% if config_path %}
+    <p id="settings-config-path">
+      Editing <code>{{ config_path }}</code>.
+      Changes to <em>Taste profile</em> and <em>Pipeline</em> take effect immediately.
+      Changes to <em>Paths &amp; network</em> require a process restart.
+    </p>
+  {% else %}
+    <p id="settings-config-path-warning" class="badge" data-status="failed">
+      No on-disk config path is known to the running process; the form below is disabled.
+    </p>
+  {% endif %}
 
-  <table id="settings-table">
-    <thead>
-      <tr>
-        <th>Field</th>
-        <th>Value</th>
-      </tr>
-    </thead>
-    <tbody id="settings-body">
-      {% for row in rows %}
-        <tr class="settings-row" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
-          <td class="field-name">{{ row.name }}</td>
-          <td class="field-value field-value-{{ row.kind }}">
-            {% if row.kind == "path" %}<code class="path-value">{{ row.value }}</code>
-            {% elif row.kind == "none" %}<em class="none-value">{{ row.value }}</em>
-            {% else %}{{ row.value }}{% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <form id="settings-form"
+        {% if not config_path %}data-disabled="true"{% endif %}
+        hx-post="/api/config" hx-ext="json-enc"
+        hx-vals='js:collectEditableFields()'
+        hx-target="#settings-result" hx-swap="innerHTML">
+    <fieldset class="settings-group">
+      <legend>Taste profile</legend>
+      <table id="settings-table-taste" class="settings-table">
+        <thead>
+          <tr><th>Field</th><th>Value</th></tr>
+        </thead>
+        <tbody>
+          {% for row in rows if row.editable and row.name in ("keep_threshold","skip_threshold","min_dislikes_for_classifier") %}
+            <tr class="settings-row settings-editable" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
+              <td class="field-name"><label for="field-{{ row.name }}">{{ row.name }}</label></td>
+              <td class="field-input">
+                {% if row.kind == "none" %}
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" placeholder="null" value="" />
+                {% elif row.kind == "bool" %}
+                  <select id="field-{{ row.name }}" name="{{ row.name }}">
+                    <option value="true" {% if row.value %}selected{% endif %}>true</option>
+                    <option value="false" {% if not row.value %}selected{% endif %}>false</option>
+                  </select>
+                {% elif row.kind == "int" or row.kind == "float" %}
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="number" step="any" value="{{ row.value }}" />
+                {% else %}
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" value="{{ row.value }}" />
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </fieldset>
+
+    <fieldset class="settings-group">
+      <legend>Pipeline</legend>
+      <table id="settings-table-pipeline" class="settings-table">
+        <thead>
+          <tr><th>Field</th><th>Value</th></tr>
+        </thead>
+        <tbody>
+          {% for row in rows if row.editable and row.name in ("feed_window_days","max_feed_items","max_metadata_fetch","chunk_seconds","min_chunk_seconds","sample_rate","model_name") %}
+            <tr class="settings-row settings-editable" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
+              <td class="field-name"><label for="field-{{ row.name }}">{{ row.name }}</label></td>
+              <td class="field-input">
+                {% if row.kind == "bool" %}
+                  <select id="field-{{ row.name }}" name="{{ row.name }}">
+                    <option value="true" {% if row.value %}selected{% endif %}>true</option>
+                    <option value="false" {% if not row.value %}selected{% endif %}>false</option>
+                  </select>
+                {% elif row.kind == "int" or row.kind == "float" %}
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="number" step="any" value="{{ row.value }}" />
+                {% else %}
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" value="{{ row.value }}" />
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </fieldset>
+
+    <fieldset class="settings-group">
+      <legend>Paths &amp; network <span class="settings-restart-badge">(restart required)</span></legend>
+      <table id="settings-table-readonly" class="settings-table">
+        <thead>
+          <tr><th>Field</th><th>Value</th></tr>
+        </thead>
+        <tbody>
+          {% for row in rows if not row.editable %}
+            <tr class="settings-row settings-readonly" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
+              <td class="field-name">{{ row.name }}</td>
+              <td class="field-value field-value-{{ row.kind }}">
+                {% if row.kind == "path" %}<code class="path-value">{{ row.value }}</code>
+                {% elif row.kind == "none" %}<em class="none-value">{{ row.value }}</em>
+                {% else %}{{ row.value }}{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </fieldset>
+
+    <div id="settings-actions">
+      <button id="settings-save" type="submit" class="run-button"
+              {% if not config_path %}disabled{% endif %}>Save settings</button>
+    </div>
+    <div id="settings-result"></div>
+  </form>
+
+  <script>
+    // collectEditableFields: walks the form and builds a JSON object
+    // containing ONLY the editable <input> / <select> elements. The
+    // form is split into editable + read-only fieldsets so the POST
+    // handler never sees path keys in the body (the read-only fields
+    // are not in any <input name=...>).
+    (function () {
+      window.collectEditableFields = function () {
+        var out = {};
+        var inputs = document.querySelectorAll(
+          '#settings-form .settings-editable input, #settings-form .settings-editable select'
+        );
+        for (var i = 0; i < inputs.length; i++) {
+          var el = inputs[i];
+          if (!el.name) continue;
+          var raw = el.value;
+          // Numeric inputs come back as strings; the backend accepts
+          // both string and numeric JSON, but normalize to the right
+          // shape so the server-side coercion matches what the form
+          // claimed.
+          if (el.type === 'number') {
+            var n = Number(raw);
+            out[el.name] = isNaN(n) ? raw : n;
+          } else if (el.tagName === 'SELECT') {
+            if (raw === 'true' || raw === 'false') {
+              out[el.name] = (raw === 'true');
+            } else {
+              out[el.name] = raw;
+            }
+          } else if (raw === '') {
+            // Empty input on a previously-None threshold field -> the
+            // user wants the threshold cleared (None on the wire).
+            out[el.name] = null;
+          } else {
+            out[el.name] = raw;
+          }
+        }
+        return out;
+      };
+
+      // Surface validation errors from POST /api/config as a visible
+      // badge inside #settings-result. The server returns 422 with a
+      // {detail: "..."} body; htmx triggers htmx:responseError, and
+      // the handler below writes the detail into the result div.
+      document.body.addEventListener('htmx:responseError', function (evt) {
+        var xhr = evt && evt.detail && evt.detail.xhr;
+        var target = evt && evt.detail && evt.detail.target;
+        if (!xhr || !target) return;
+        if (target.id !== 'settings-result') return;
+        if (xhr.status !== 422 && xhr.status !== 409) return;
+        try {
+          var body = JSON.parse(xhr.responseText);
+          var detail = body && body.detail ? body.detail : ('HTTP ' + xhr.status);
+        } catch (e) {
+          var detail = 'HTTP ' + xhr.status;
+        }
+        target.innerHTML = '<div class="badge" data-status="failed">Error: ' +
+          String(detail).replace(/[<>&]/g, function (c) {
+            return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c];
+          }) +
+          '</div>';
+      });
+
+      document.body.addEventListener('htmx:afterRequest', function (evt) {
+        var xhr = evt && evt.detail && evt.detail.xhr;
+        var target = evt && evt.detail && evt.detail.target;
+        if (!xhr || !target) return;
+        if (target.id !== 'settings-result') return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          target.innerHTML = '<div class="badge" data-status="succeeded">Settings saved.</div>';
+        }
+      });
+    })();
+  </script>
 {% endblock %}

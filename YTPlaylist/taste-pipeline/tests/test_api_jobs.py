@@ -291,6 +291,7 @@ def test_dashboard_run_buttons_use_hx_ext_json_enc_for_api_jobs(tmp_path: Path) 
         ("run-metadata", '"kind":"metadata"'),
         ("run-download", '"kind":"download"'),
         ("run-index", '"kind":"index"'),
+        ("run-calibrate", '"kind":"calibrate"'),
     )
     json_enc_marker = 'hx-ext="json-enc"'
     for button_id, expected_kind_marker in expected_buttons:
@@ -308,7 +309,7 @@ def test_dashboard_run_buttons_use_hx_ext_json_enc_for_api_jobs(tmp_path: Path) 
         )
 
     actual_count = body.count(json_enc_marker)
-    assert actual_count == 4, f"expected exactly 4 {json_enc_marker} attributes, found {actual_count}"
+    assert actual_count == 5, f"expected exactly 5 {json_enc_marker} attributes, found {actual_count}"
 
 
 def test_base_template_loads_htmx_and_json_enc_extension(tmp_path: Path) -> None:

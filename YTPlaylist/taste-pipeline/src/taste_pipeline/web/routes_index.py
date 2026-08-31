@@ -17,6 +17,12 @@ Response shape (locked by ``tests/test_api_index.py``):
 - ``like_library_track_count``: recursive count of audio files
   (``.flac``/``.mp3``/``.opus``/``.m4a``/``.ogg``, case-insensitive)
   under ``config.like_library_dir``.
+- ``thresholds``: ``{"keep_threshold": float, "skip_threshold": float}``
+  when ``<data_dir>/thresholds.json`` exists and parses; ``None`` when
+  the user has never run calibration (so the dashboard renders
+  "(not calibrated)"). The value comes from
+  :func:`taste_pipeline.calibrate.load_thresholds`, which treats a
+  malformed thresholds.json as missing.
 
 This module intentionally has no dependency on ``taste_pipeline.embed``
 or ``taste_pipeline.library.scan_library`` -- loading the CLAP model on
@@ -61,13 +67,26 @@ def build_index_status(config: Config) -> dict[str, object]:
     the ``/api/index`` JSON endpoint returns. Keeping the computation in
     one place means a future change to the response shape is a single
     edit, not a coordinated update to two handlers.
+
+    The ``thresholds`` field comes from
+    :func:`taste_pipeline.calibrate.load_thresholds` (which returns
+    ``None`` when the file is absent or malformed) so the dashboard can
+    render ``"(not calibrated)"`` before the user runs the calibrate job.
+    The lazy import keeps :mod:`taste_pipeline.calibrate` (and its
+    transitive numpy) off the import path of this read-only endpoint's
+    module-load; the import only happens at request time.
     """
+    from taste_pipeline.calibrate import (  # noqa: PLC0415 -- lazy: avoid numpy import on read path
+        load_thresholds,
+    )
+
     manifest_path = config.data_dir / _INDEX_SUBDIR / _MANIFEST_NAME
     return {
         "count": _read_manifest_count(manifest_path),
         "last_scan": _manifest_mtime_iso(manifest_path),
         "like_library_path": str(config.like_library_dir),
         "like_library_track_count": _count_audio_files(config.like_library_dir),
+        "thresholds": load_thresholds(config.data_dir),
     }
 
 

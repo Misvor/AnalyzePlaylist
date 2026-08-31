@@ -85,7 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _ = sys.stderr.write(f"{exc}\n{_CONFIG_NOT_FOUND_HINT}")
             return 2
         raise
-    app = create_app(config)
+    app = create_app(config, config_path=config_path)
     host = config.web_host
     port = config.web_port
     if server_mode:

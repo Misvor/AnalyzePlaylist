@@ -33,16 +33,25 @@ _STATIC_DIR: Final = _PACKAGE_DIR / "static"
 _TEMPLATES_DIR: Final = _PACKAGE_DIR / "templates"
 
 
-def create_app(config: Config) -> FastAPI:
+def create_app(config: Config, *, config_path: Path | None = None) -> FastAPI:
     """Build the FastAPI app for an already-validated pipeline config.
 
     Mounts the package ``static/`` dir at ``/static``, registers the package
     ``templates/`` dir with ``Jinja2Templates``, stores ``config`` on
     ``app.state.config`` for later route modules, and serves the base HTML
     shell at ``GET /``.
+
+    Args:
+        config: Validated pipeline config (built by ``load_config``).
+        config_path: Filesystem path the config was loaded from; required
+            for ``POST /api/config`` to persist edits back to the same
+            file. When ``None`` (the default), the settings editor
+            refuses to write -- the page still renders, but the form
+            is disabled and ``POST /api/config`` returns 409.
     """
     app = FastAPI(title="Taste Pipeline")
     app.state.config = config
+    app.state.config_path = config_path
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
     templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 

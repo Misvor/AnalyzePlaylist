@@ -11,7 +11,7 @@ default fixture.
 The dashboard's contract:
 - extends ``base.html`` (so nav IDs, status bar, htmx script, app.css are
   inherited),
-- contains four run buttons (one per pipeline pass kind) wired with
+- contains five run buttons (one per pipeline pass kind + calibrate) wired with
   ``hx-post="/api/jobs"`` + ``hx-vals='{"kind":"<feed|metadata|download|index>"}'``,
 - contains a ``<table id="run-history">`` for htmx to populate from
   ``GET /api/jobs`` (the actual row population is a client-side htmx swap
@@ -103,7 +103,7 @@ def _button_exists(html: str, button_id: str, *, expected_label: str) -> bool:
     return expected_label in block and 'hx-post="/api/jobs"' in block
 
 
-def test_get_root_renders_dashboard_with_four_run_buttons(tmp_path: Path) -> None:
+def test_get_root_renders_dashboard_with_five_run_buttons(tmp_path: Path) -> None:
     # Given an app built from a valid config
     client = _client(tmp_path)
 
@@ -122,6 +122,7 @@ def test_get_root_renders_dashboard_with_four_run_buttons(tmp_path: Path) -> Non
         ("run-metadata", "Pass B — Metadata", '"kind":"metadata"'),
         ("run-download", "Pass C — Download", '"kind":"download"'),
         ("run-index", "Build Index", '"kind":"index"'),
+        ("run-calibrate", "Calibrate weights", '"kind":"calibrate"'),
     )
     for button_id, expected_label, expected_kind_marker in expected_buttons:
         assert _button_exists(body, button_id, expected_label=expected_label), (

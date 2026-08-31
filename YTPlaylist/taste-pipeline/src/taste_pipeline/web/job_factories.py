@@ -161,12 +161,42 @@ def make_index_factory(config: Config) -> RunFn:
     return run_fn
 
 
+def make_calibrate_factory(config: Config, state: StateStore) -> RunFn:
+    """Build a ``calibrate`` factory: derive keep/skip thresholds from the like-library.
+
+    Delegates to :func:`taste_pipeline.calibrate.run_calibration`, which
+    itself imports :mod:`taste_pipeline.embed` and
+    :mod:`taste_pipeline.library` lazily inside the function. Tests
+    monkey-patch ``taste_pipeline.embed.embed_track`` and
+    ``taste_pipeline.library.scan_library`` before submitting; the
+    calibrate module looks up those names by attribute at call time so
+    the patches are observed.
+
+    The :class:`StateStore` argument is part of the factory contract
+    (every production factory takes ``(config, state)``) but the
+    calibration pass does not record any state store stages — the
+    ``keep``/``skip`` decisions happen later in the download/triage
+    flow.
+    """
+    from taste_pipeline import calibrate  # noqa: PLC0415 -- lazy: monkey-patch works
+
+    def run_fn(report: Callable[[float, str], None]) -> None:
+        # ``state`` is part of the factory contract (every production
+        # factory takes ``(config, state)``) but the calibration pass
+        # does not record any state store stages -- the keep/skip
+        # decisions happen later in the download/triage flow.
+        _ = state
+        _ = calibrate.run_calibration(config, report)
+
+    return run_fn
+
+
 def register_factories(
     target: dict[str, RunFn],
     config: Config,
     state: StateStore,
 ) -> None:
-    """Populate ``target`` with the four production factories bound to ``(config, state)``.
+    """Populate ``target`` with the production factories bound to ``(config, state)``.
 
     The caller (the POST handler in :mod:`taste_pipeline.web.routes_jobs`)
     guards with ``if not JOB_FACTORIES`` so a test that already populated
@@ -178,3 +208,4 @@ def register_factories(
     target["metadata"] = make_metadata_factory(config, state)
     target["download"] = make_download_factory(config, state)
     target["index"] = make_index_factory(config)
+    target["calibrate"] = make_calibrate_factory(config, state)

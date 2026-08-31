@@ -12,6 +12,15 @@
     <span class="index-status-scan">Last scan: {{ index_status.last_scan or "never" }}</span>
     <span class="index-status-sep">|</span>
     <span class="index-status-lib">Like-library: {{ index_status.like_library_track_count }} files ({{ index_status.like_library_path }})</span>
+    <span class="index-status-sep">|</span>
+    <span class="index-status-thresholds">
+      {% if index_status.thresholds %}
+        Keep &ge; {{ "%.2f"|format(index_status.thresholds.keep_threshold) }} |
+        Skip &lt; {{ "%.2f"|format(index_status.thresholds.skip_threshold) }}
+      {% else %}
+        Thresholds: (not calibrated)
+      {% endif %}
+    </span>
   </div>
 
   <div id="run-buttons">
@@ -27,6 +36,9 @@
     <button id="run-index" class="run-button"
             hx-post="/api/jobs" hx-ext="json-enc" hx-vals='{"kind":"index"}'
             hx-target="#run-history-body" hx-swap="afterbegin">Build Index</button>
+    <button id="run-calibrate" class="run-button"
+            hx-post="/api/jobs" hx-ext="json-enc" hx-vals='{"kind":"calibrate"}'
+            hx-target="#run-history-body" hx-swap="afterbegin">Calibrate weights</button>
   </div>
 
   <div id="concurrent-error" class="badge" data-status="failed" hidden></div>

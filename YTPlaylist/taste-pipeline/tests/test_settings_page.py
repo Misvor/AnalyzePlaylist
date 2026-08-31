@@ -56,9 +56,15 @@ def _toml_path(path: Path) -> str:
 
 
 def _write_config(tmp_path: Path) -> Path:
-    """Write a minimal valid config TOML under tmp_path and return its path."""
+    """Write a minimal valid config TOML under tmp_path and return its path.
+
+    ``exist_ok=True`` mirrors ``tests/conftest.py`` so the helper can
+    be called twice on the same ``tmp_path`` (some new tests write a
+    config, build an app that edits it, then need the same path back
+    to inspect the on-disk state).
+    """
     like_lib = tmp_path / "lib"
-    like_lib.mkdir()
+    like_lib.mkdir(exist_ok=True)
     body = (
         f'like_library_dir = "{_toml_path(like_lib)}"\n'
         f'data_dir = "{_toml_path(tmp_path / "data")}"\n'
@@ -75,8 +81,16 @@ def _make_config(tmp_path: Path) -> Config:
 
 
 def _client(tmp_path: Path) -> TestClient:
-    """Build a TestClient over a real Config-derived app."""
-    return TestClient(create_app(_make_config(tmp_path)))
+    """Build a TestClient over a real Config-derived app with config_path recorded.
+
+    Recording ``config_path`` on ``app.state`` is what enables the
+    ``POST /api/config`` endpoint to atomically rewrite the same file
+    the test loaded from. Without it, ``POST /api/config`` returns 409
+    and the form is rendered with the form-disabled flag.
+    """
+    config_path = _write_config(tmp_path)
+    config = load_config(config_path)
+    return TestClient(create_app(config, config_path=config_path))
 
 
 def test_get_settings_returns_200_with_base_template(tmp_path: Path) -> None:
@@ -245,3 +259,289 @@ def test_get_settings_renders_numeric_fields_correctly(tmp_path: Path) -> None:
         "settings page missing the digit '7' for feed_window_days=7; "
         "expected the literal integer to appear in the value cell"
     )
+
+
+# ── Editable-settings contract (POST /api/config) ────────────────────────
+
+
+# The editable + read-only split is the contract the form renders and the
+# POST handler enforces. Each entry here is the canonical name from
+# ``dataclasses.fields(Config)``; the test asserts every Config field is
+# classified into exactly one bucket so a future config drift cannot
+# silently land a path field in the editable bucket (or vice versa).
+EXPECTED_EDITABLE_FIELDS = frozenset(
+    {
+        "keep_threshold",
+        "skip_threshold",
+        "min_dislikes_for_classifier",
+        "feed_window_days",
+        "max_feed_items",
+        "max_metadata_fetch",
+        "chunk_seconds",
+        "min_chunk_seconds",
+        "sample_rate",
+        "model_name",
+    }
+)
+EXPECTED_READONLY_FIELDS = frozenset(
+    {
+        "like_library_dir",
+        "data_dir",
+        "cookie_file",
+        "download_archive",
+        "web_host",
+        "web_port",
+    }
+)
+
+
+def test_get_settings_returns_form_with_inputs_for_editable_fields(tmp_path: Path) -> None:
+    # Given a real app built from a tmp config (with config_path so POST works)
+    client = _client(tmp_path)
+
+    # When requesting the settings page
+    response = client.get("/settings")
+
+    # Then the page renders a <form> and every editable Config field is
+    # bound to an <input> or <select> whose name= matches the field.
+    assert response.status_code == 200
+    body = response.text
+    assert '<form id="settings-form"' in body, "settings page is missing the form wrapper"
+    for field_name in EXPECTED_EDITABLE_FIELDS:
+        # The input/select is named after the field; the form collects
+        # all editable fields via collectEditableFields().
+        assert f'name="{field_name}"' in body, (
+            f"settings form missing an input/select for editable field {field_name!r}; "
+            f"the user cannot edit a field that has no input"
+        )
+
+
+def test_get_settings_renders_readonly_fields_without_inputs(tmp_path: Path) -> None:
+    # Given a real app built from a tmp config
+    client = _client(tmp_path)
+
+    # When requesting the settings page
+    response = client.get("/settings")
+
+    # Then every read-only Config field is rendered as text (a <code> or
+    # plain value cell) and has NO <input name=...> -- otherwise the
+    # form would post path keys to POST /api/config.
+    assert response.status_code == 200
+    body = response.text
+    for field_name in EXPECTED_READONLY_FIELDS:
+        assert field_name in body, (
+            f"settings page missing read-only field {field_name!r}; "
+            f"the user needs to see WHERE the cookies / data live"
+        )
+        # Belt-and-suspenders: the field name MUST NOT appear as a
+        # form input name (which would mean the form is wired to
+        # submit it to POST /api/config).
+        assert f'name="{field_name}"' not in body, (
+            f"settings form has an input named {field_name!r} but it is read-only; "
+            f"the POST handler would reject it with 422 (and the user has no "
+            f"reason to type into a disabled field)"
+        )
+
+
+def test_post_config_updates_keep_threshold_in_memory_and_on_disk(tmp_path: Path) -> None:
+    # Given a tmp config with config_path recorded on app.state
+    config_path = _write_config(tmp_path)
+    client = _client(tmp_path)
+    # Sanity: starting state has keep_threshold = None (default)
+    assert _make_config(tmp_path).keep_threshold is None
+
+    # When POSTing a valid update that sets keep_threshold=0.85
+    response = client.post("/api/config", json={"keep_threshold": 0.85})
+
+    # Then the response is 200 and the in-memory config reflects the change
+    assert response.status_code == 200, (
+        f"POST /api/config returned {response.status_code}; expected 200; body={response.text[:300]}"
+    )
+    payload = response.json()
+    assert payload["keep_threshold"] == 0.85, (
+        f"response payload did not reflect the update: keep_threshold={payload['keep_threshold']!r}"
+    )
+    # And the on-disk file was updated too
+    assert config_path.is_file(), f"config.toml went missing at {config_path}"
+    reloaded = load_config(config_path)
+    assert reloaded.keep_threshold == 0.85, (
+        f"on-disk config did not pick up the update; reload sees keep_threshold={reloaded.keep_threshold!r}"
+    )
+    # And subsequent GET /settings reads the new value (the in-memory
+    # state was refreshed by the handler, not just the on-disk file).
+    response2 = client.get("/settings")
+    assert "0.85" in response2.text, (
+        "GET /settings after POST did not show the updated keep_threshold; app.state.config was not refreshed"
+    )
+
+
+def test_post_config_rejects_invalid_keep_threshold_above_1(tmp_path: Path) -> None:
+    # Given a real app
+    client = _client(tmp_path)
+
+    # When POSTing an out-of-range keep_threshold
+    response = client.post("/api/config", json={"keep_threshold": 1.5})
+
+    # Then 422 (keep_threshold must be in [0, 1] or null)
+    assert response.status_code == 422, (
+        f"POST /api/config with keep_threshold=1.5 returned {response.status_code}; expected 422"
+    )
+    assert "must be <=" in response.json()["detail"], (
+        f"error detail must mention the bound; got {response.json()['detail']!r}"
+    )
+
+
+def test_post_config_rejects_non_numeric_chunk_seconds(tmp_path: Path) -> None:
+    # Given a real app
+    client = _client(tmp_path)
+
+    # When POSTing a non-numeric chunk_seconds
+    response = client.post("/api/config", json={"chunk_seconds": "abc"})
+
+    # Then 422 (chunk_seconds must be a number)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "must be a number" in detail, f"error detail should mention 'must be a number', got {detail!r}"
+
+
+def test_post_config_atomic_write_creates_no_temp_file_on_success(tmp_path: Path) -> None:
+    # Given a real app
+    config_path = _write_config(tmp_path)
+    client = TestClient(create_app(load_config(config_path), config_path=config_path))
+
+    # When POSTing a valid update
+    response = client.post("/api/config", json={"feed_window_days": 14})
+
+    # Then the response is 200 and NO config.toml.tmp file remains --
+    # the atomic write (write to .tmp + Path.replace) must complete by
+    # the time the POST handler returns.
+    assert response.status_code == 200
+    tmp_left = config_path.with_suffix(config_path.suffix + ".tmp")
+    assert not tmp_left.exists(), f"atomic write left a stray {tmp_left}; Path.replace() should have moved it"
+
+
+def test_post_config_does_not_persist_path_fields(tmp_path: Path) -> None:
+    """Even if the user crafts a JSON body with like_library_dir, the server rejects it.
+
+    This locks the contract: path edits require a restart. A regression
+    that accepted path keys would either (a) try to move directories
+    at runtime (likely to fail with permission errors) or (b) silently
+    update app.state.config without the on-disk effect the user
+    expects (worse -- the next restart restores the old path).
+    """
+    # Given a real app
+    config_path = _write_config(tmp_path)
+    client = _client(tmp_path)
+
+    # When POSTing a path field
+    response = client.post(
+        "/api/config",
+        json={"like_library_dir": str(tmp_path / "somewhere_else")},
+    )
+
+    # Then 422 (read-only field)
+    assert response.status_code == 422, (
+        f"POST /api/config with a path field returned {response.status_code}; expected 422"
+    )
+    assert "read-only" in response.json()["detail"], (
+        f"error detail should mention read-only; got {response.json()['detail']!r}"
+    )
+    # And the file was not modified (the atomic write never happened)
+    reloaded = load_config(config_path)
+    assert str(reloaded.like_library_dir) == str(tmp_path / "lib"), (
+        f"on-disk like_library_dir was modified despite the 422: {reloaded.like_library_dir!r}"
+    )
+
+
+def test_post_config_returns_updated_config_json(tmp_path: Path) -> None:
+    """The POST response carries the full updated Config so the client can sync its local copy."""
+    # Given a real app
+    client = _client(tmp_path)
+
+    # When POSTing a single field update
+    response = client.post("/api/config", json={"sample_rate": 44100})
+
+    # Then the response is 200 JSON with EVERY Config field (not just the updated one)
+    assert response.status_code == 200
+    payload = response.json()
+    expected_keys = {f.name for f in fields(Config)}
+    assert set(payload.keys()) == expected_keys, (
+        f"response payload missing keys; expected exactly the Config fields, got "
+        f"missing={expected_keys - set(payload.keys())} extra={set(payload.keys()) - expected_keys}"
+    )
+    assert payload["sample_rate"] == 44100, (
+        f"sample_rate not in response payload; got {payload['sample_rate']!r}"
+    )
+
+
+def test_post_config_returns_409_when_config_path_unknown(tmp_path: Path) -> None:
+    """An app built without config_path cannot persist edits; POST returns 409 (not 500)."""
+    # Given an app built without config_path
+    cfg = _make_config(tmp_path)
+    client = TestClient(create_app(cfg))  # no config_path kwarg -> None
+
+    # When POSTing an update
+    response = client.post("/api/config", json={"keep_threshold": 0.5})
+
+    # Then 409 with a clear message
+    assert response.status_code == 409, (
+        f"POST /api/config without config_path returned {response.status_code}; expected 409"
+    )
+    assert "config_path" in response.json()["detail"], (
+        f"error detail should mention config_path; got {response.json()['detail']!r}"
+    )
+
+
+def test_post_config_preserves_unmentioned_fields_on_disk(tmp_path: Path) -> None:
+    """POST /api/config is a PARTIAL update -- fields not in the body must survive on disk.
+
+    The atomic write merges the new values with the existing file
+    contents so a single-field POST does not erase the rest of the
+    config.
+    """
+    # Given a real app
+    config_path = _write_config(tmp_path)
+    original = load_config(config_path)
+    client = _client(tmp_path)
+
+    # When POSTing only keep_threshold
+    response = client.post("/api/config", json={"keep_threshold": 0.7})
+
+    # Then the file on disk has the new keep_threshold AND every other field intact
+    assert response.status_code == 200
+    reloaded = load_config(config_path)
+    assert reloaded.keep_threshold == 0.7
+    assert reloaded.feed_window_days == original.feed_window_days
+    assert reloaded.web_port == original.web_port
+    assert reloaded.model_name == original.model_name
+
+
+def test_post_config_rejects_unknown_field(tmp_path: Path) -> None:
+    """Unknown fields are rejected (not silently dropped) so typos surface immediately."""
+    # Given a real app
+    client = _client(tmp_path)
+
+    # When POSTing an unknown key
+    response = client.post("/api/config", json={"not_a_real_field": 123})
+
+    # Then 422 with an "unknown field" message
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "not_a_real_field" in detail, f"error detail should name the unknown field; got {detail!r}"
+    assert "unknown" in detail, f"error detail should mention 'unknown'; got {detail!r}"
+
+
+def test_post_config_rejects_skip_threshold_gte_keep_threshold(tmp_path: Path) -> None:
+    """Cross-field invariant: skip must stay strictly less than keep."""
+    # Given a real app with keep_threshold set
+    client = _client(tmp_path)
+    _ = client.post("/api/config", json={"keep_threshold": 0.8})
+
+    # When POSTing skip_threshold >= keep_threshold
+    response = client.post("/api/config", json={"skip_threshold": 0.85})
+
+    # Then 422 with a clear invariant message
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "skip_threshold" in detail, f"error detail should name skip_threshold; got {detail!r}"
+    assert "keep_threshold" in detail, f"error detail should name keep_threshold; got {detail!r}"

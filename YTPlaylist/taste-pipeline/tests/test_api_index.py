@@ -185,15 +185,15 @@ def test_get_api_index_like_library_track_count_counts_audio_files(tmp_path: Pat
     assert response.json()["like_library_track_count"] == 6
 
 
-def test_get_api_index_response_shape_has_all_four_fields(tmp_path: Path) -> None:
-    """The response payload always has exactly the canonical 4 keys."""
+def test_get_api_index_response_shape_has_all_five_fields(tmp_path: Path) -> None:
+    """The response payload always has exactly the canonical 5 keys."""
     # Given a fresh config (no index, empty lib)
     client = _make_client(tmp_path)
 
     # When requesting the index status endpoint
     response = client.get("/api/index")
 
-    # Then the response shape is the canonical 4-key dict
+    # Then the response shape is the canonical 5-key dict
     assert response.status_code == 200
     payload = response.json()
     assert set(payload.keys()) == {
@@ -201,6 +201,7 @@ def test_get_api_index_response_shape_has_all_four_fields(tmp_path: Path) -> Non
         "last_scan",
         "like_library_path",
         "like_library_track_count",
+        "thresholds",
     }
 
 
@@ -326,3 +327,49 @@ def test_build_index_status_helper_matches_endpoint_payload(tmp_path: Path) -> N
 
     # Then the two payloads are byte-equal: same keys, same values
     assert helper_payload == endpoint_payload
+
+
+def test_get_api_index_returns_none_thresholds_when_not_calibrated(tmp_path: Path) -> None:
+    """When no thresholds.json exists, the response's thresholds field is None."""
+    # Given a config whose data_dir has no thresholds.json
+    cfg = load_config(_write_config(tmp_path))
+    client = TestClient(create_app(cfg))
+
+    # When requesting the index status endpoint
+    response = client.get("/api/index")
+
+    # Then the thresholds field is None (the dashboard renders "(not calibrated)")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "thresholds" in payload, "response must always carry the thresholds key"
+    assert payload["thresholds"] is None, (
+        f"thresholds must be None when no thresholds.json exists, got {payload['thresholds']!r}"
+    )
+
+
+def test_get_api_index_returns_thresholds_when_calibrated(tmp_path: Path) -> None:
+    """When thresholds.json exists, the response's thresholds field carries the parsed dict."""
+    # Given a config whose data_dir has a valid thresholds.json
+    cfg = load_config(_write_config(tmp_path))
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.data_dir / "thresholds.json").write_text(
+        json.dumps(
+            {
+                "keep_threshold": 0.81,
+                "skip_threshold": 0.19,
+                "computed_at": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(cfg))
+
+    # When requesting the index status endpoint
+    response = client.get("/api/index")
+
+    # Then the thresholds field carries the keep/skip pair (computed_at is stripped)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["thresholds"] == {"keep_threshold": 0.81, "skip_threshold": 0.19}, (
+        f"thresholds field must round-trip the keep/skip values; got {payload['thresholds']!r}"
+    )

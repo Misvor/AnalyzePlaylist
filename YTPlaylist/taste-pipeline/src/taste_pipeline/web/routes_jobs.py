@@ -2,7 +2,7 @@ r"""Job control + SSE progress endpoints for the taste-pipeline web UI.
 
 Mounts four read/write endpoints under ``/api/jobs``:
 
-- ``POST /api/jobs`` body ``{"kind": "feed"|"metadata"|"download"|"index"}``
+- ``POST /api/jobs`` body ``{"kind": "feed"|"metadata"|"download"|"index"|"calibrate"}``
   -> creates a new :class:`~taste_pipeline.web.jobs.Job` via the runner
   exposed on ``app.state.runner`` and returns the job JSON (status 201).
 - ``GET /api/jobs`` -> list of all jobs newest-first (status 200).
@@ -66,9 +66,9 @@ _TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "cancelle
 
 # Single source of truth for valid job kinds -- checked at runtime in
 # :func:`create_job` against the parsed JSON body. Tests should NOT
-# hardcode a 4-element tuple; iterate this set instead so a future
+# hardcode a hardcoded tuple; iterate this set instead so a future
 # new kind is added by editing one place.
-_KNOWN_KINDS: frozenset[str] = frozenset({"feed", "metadata", "download", "index"})
+_KNOWN_KINDS: frozenset[str] = frozenset({"feed", "metadata", "download", "index", "calibrate"})
 
 
 def _job_to_payload(job: Job) -> dict[str, object]:

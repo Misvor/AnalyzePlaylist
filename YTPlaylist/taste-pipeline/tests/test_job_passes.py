@@ -330,11 +330,11 @@ async def test_register_factories_populates_all_four_kinds(
     # When register_factories is called
     job_factories.register_factories(target, config, state)
 
-    # Then all four kinds are populated with a callable factory
+    # Then all five kinds are populated with a callable factory
     # (we do NOT invoke the factories here -- the production metadata + download
     # factories re-fetch the feed, which would hit the real network without
     # the per-test monkey-patches used in the other tests; each factory's
     # behavior is covered by the make_X_factory tests above)
-    assert set(target) == {"feed", "metadata", "download", "index"}
+    assert set(target) == {"feed", "metadata", "download", "index", "calibrate"}
     for kind, factory in target.items():
         assert callable(factory), f"factory for {kind!r} is not callable: {factory!r}"
