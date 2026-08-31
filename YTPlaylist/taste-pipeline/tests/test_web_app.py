@@ -193,3 +193,23 @@ def test_argparse_defaults_to_window_mode_and_optional_config(tmp_path: Path) ->
     # Then server mode is off and the config path is captured
     assert args.server is False
     assert args.config is not None
+
+
+def test_open_directory_dialog_returns_none_when_no_windows() -> None:
+    # Given the web_main module imported outside of pywebview's main thread
+    # (i.e. no live window registered in webview.windows)
+    # When calling open_directory_dialog directly
+    # Then it returns None without raising (no-webs-of-viewports case)
+    # This is the contract the settings page JS relies on: the desktop
+    # path falls back gracefully when not running inside pywebview.
+    import webview  # noqa: PLC0415 -- local: only used to check the empty-windows invariant
+
+    assert not webview.windows
+    assert web_main.open_directory_dialog() is None
+
+
+def test_open_file_dialog_returns_none_when_no_windows() -> None:
+    # Given the web_main module imported without a pywebview window
+    # When calling open_file_dialog directly
+    # Then it returns None (mirrors the directory-dialog no-window case)
+    assert web_main.open_file_dialog() is None

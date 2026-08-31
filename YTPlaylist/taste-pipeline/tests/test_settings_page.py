@@ -382,6 +382,68 @@ def test_get_settings_renders_network_fields_as_editable_inputs(tmp_path: Path) 
     assert 'max="65535"' in port_tag, f"web_port input must declare max=65535; got {port_tag!r}"
 
 
+def test_get_settings_includes_browse_buttons_for_storage_paths(tmp_path: Path) -> None:
+    # Given the settings page rendered for a fresh config
+    client = _client(tmp_path)
+
+    # When requesting it
+    response = client.get("/settings")
+
+    # Then every Storage path field has a Browse button with the right
+    # data-pick kind and the right data-target (locks the contract: the
+    # JS handler uses these attributes to dispatch the native dialog).
+    assert response.status_code == 200
+    body = response.text
+
+    expected_buttons = (
+        ("like_library_dir", "directory"),
+        ("data_dir", "directory"),
+        ("download_archive", "directory"),
+        ("cookie_file", "file"),
+    )
+    for field_name, pick_kind in expected_buttons:
+        pattern = (
+            r'<button\b[^>]*\bclass="browse-btn"[^>]*\bdata-pick="'
+            + pick_kind
+            + r'"[^>]*\bdata-target="field-'
+            + field_name
+            + r'"[^>]*>.*?</button>'
+        )
+        match = re.search(pattern, body, flags=re.DOTALL)
+        assert match, (
+            f"missing Browse button for {field_name!r} with data-pick={pick_kind!r}; "
+            f"page does not render a native-dialog trigger for this field"
+        )
+        assert "Browse..." in match.group(0), (
+            f"Browse button for {field_name!r} missing the visible 'Browse...' label"
+        )
+
+
+def test_get_settings_includes_pick_path_javascript_handler(tmp_path: Path) -> None:
+    # Given the settings page rendered
+    client = _client(tmp_path)
+
+    # When requesting it
+    response = client.get("/settings")
+
+    # Then the inline JS contains the desktop native-dialog path (uses
+    # ``window.pywebview.api.open_directory_dialog``) and the browser
+    # fallback path (uses ``webkitdirectory``). Locks both branches so
+    # a regression in either handler is caught.
+    assert response.status_code == 200
+    body = response.text
+    assert "pickPath" in body, "settings form missing pickPath helper"
+    assert "window.pywebview" in body, (
+        "settings form does not attempt to call window.pywebview.api for the desktop native dialog"
+    )
+    assert "open_directory_dialog" in body, "settings form does not call open_directory_dialog"
+    assert "open_file_dialog" in body, "settings form does not call open_file_dialog"
+    assert "webkitdirectory" in body, (
+        "settings form is missing the browser fallback (webkitdirectory); "
+        "browsers cannot expose absolute paths so the fallback only gives a NAME"
+    )
+
+
 def test_get_settings_shows_unapplied_changes_banner_when_path_differs(tmp_path: Path) -> None:
     # Given a tmp config.toml that DIFFERS from the running snapshot:
     # the file on disk has like_library_dir = a NEW directory, but

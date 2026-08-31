@@ -110,11 +110,16 @@
         </thead>
         <tbody>
           {% for row in rows if row.editable and row.name in ("like_library_dir","data_dir","cookie_file","download_archive") %}
+            {% set pick_kind = "file" if row.name == "cookie_file" else "directory" %}
             <tr class="settings-row settings-editable settings-restart" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
               <td class="field-name"><label for="field-{{ row.name }}">{{ row.name }}</label></td>
               <td class="field-input">
-                <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" class="path-input"
-                       value="{{ row.value }}" autocomplete="off" />
+                <div class="path-field-row">
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" class="path-input"
+                         value="{{ row.value }}" autocomplete="off" />
+                  <button type="button" class="browse-btn"
+                          data-pick="{{ pick_kind }}" data-target="field-{{ row.name }}">Browse...</button>
+                </div>
               </td>
             </tr>
           {% endfor %}
@@ -133,11 +138,13 @@
             <tr class="settings-row settings-editable settings-restart" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
               <td class="field-name"><label for="field-{{ row.name }}">{{ row.name }}</label></td>
               <td class="field-input">
-                {% if row.kind == "int" %}
-                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="number" min="1" max="65535" step="1" value="{{ row.value }}" />
-                {% else %}
-                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" value="{{ row.value }}" maxlength="255" autocomplete="off" />
-                {% endif %}
+                <div class="path-field-row">
+                  {% if row.kind == "int" %}
+                    <input id="field-{{ row.name }}" name="{{ row.name }}" type="number" min="1" max="65535" step="1" value="{{ row.value }}" />
+                  {% else %}
+                    <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" value="{{ row.value }}" maxlength="255" autocomplete="off" />
+                  {% endif %}
+                </div>
               </td>
             </tr>
           {% endfor %}
@@ -232,6 +239,90 @@
           window.setTimeout(function () { window.location.reload(); }, 600);
         }
       });
+
+      // Browse buttons: open the host OS native dialog (pywebview
+      // exposes `open_directory_dialog` / `open_file_dialog` via
+      // `window.pywebview.api`). In browser mode, fall back to a hidden
+      // <input type="file"> -- browsers do not expose absolute paths,
+      // so the picked NAME goes into the input and the user prepends
+      // the parent path manually. The desktop path is the happy one.
+      function attachBrowseHandlers() {
+        var btns = document.querySelectorAll('button.browse-btn');
+        for (var i = 0; i < btns.length; i++) {
+          (function (btn) {
+            if (btn.dataset.browseBound === '1') return;
+            btn.dataset.browseBound = '1';
+            btn.addEventListener('click', function (event) {
+              event.preventDefault();
+              pickPath(btn);
+            });
+          })(btns[i]);
+        }
+      }
+      async function pickPath(btn) {
+        var targetId = btn.dataset.target;
+        var kind = btn.dataset.pick;
+        var input = document.getElementById(targetId);
+        if (!input) return;
+        var picked = null;
+        if (window.pywebview && window.pywebview.api) {
+          try {
+            picked = kind === 'directory'
+              ? await window.pywebview.api.open_directory_dialog()
+              : await window.pywebview.api.open_file_dialog();
+          } catch (e) {
+            picked = null;
+          }
+        } else {
+          picked = await pickViaBrowserInput(kind);
+        }
+        if (picked) {
+          input.value = picked;
+          input.dispatchEvent(new Event('change'));
+        }
+      }
+      function pickViaBrowserInput(kind) {
+        return new Promise(function (resolve) {
+          var fi = document.createElement('input');
+          fi.type = 'file';
+          if (kind === 'directory') {
+            fi.setAttribute('webkitdirectory', '');
+            fi.setAttribute('directory', '');
+          }
+          fi.style.display = 'none';
+          document.body.appendChild(fi);
+          function done(result) {
+            if (fi.parentNode) fi.parentNode.removeChild(fi);
+            resolve(result);
+          }
+          fi.addEventListener('change', function () {
+            var file = fi.files && fi.files[0];
+            if (!file) { done(null); return; }
+            // Browsers hide absolute paths. Return the picked NAME
+            // (or directory portion of webkitRelativePath). The user
+            // prepends the parent path manually.
+            var relative = file.webkitRelativePath || file.name;
+            if (kind === 'directory') {
+              var slash = relative.indexOf('/');
+              if (slash > 0) {
+                done(relative.substring(0, slash));
+                return;
+              }
+            }
+            done(relative);
+          });
+          // Best-effort cancel handler; not all browsers fire it.
+          fi.addEventListener('cancel', function () { done(null); });
+          fi.click();
+          // Timeout fallback if neither change nor cancel fires (e.g.
+          // user closes the picker without selecting anything).
+          window.setTimeout(function () {
+            if (fi.parentNode) done(null);
+          }, 30000);
+        });
+      }
+      attachBrowseHandlers();
+      document.body.addEventListener('htmx:afterSwap', attachBrowseHandlers);
     })();
   </script>
 {% endblock %}
