@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from taste_pipeline.state import StateStore
@@ -140,3 +141,37 @@ def test_get_download_record_returns_latest_path_after_replace(tmp_path: Path) -
     assert result is not None
     _stage, stored_path = result
     assert Path(stored_path) == new_path
+
+
+def test_state_store_is_usable_from_a_worker_thread(tmp_path: Path) -> None:
+    # Given a StateStore built on the main thread (the web app builds one on the
+    # event-loop thread and hands it to the JobRunner's worker threads)
+    store = StateStore(tmp_path)
+    captured: dict[str, object] = {}
+
+    def worker() -> None:
+        try:
+            _ = store.record_seen("vid-worker", stage="listed")
+            captured["seen"] = store.already_seen("vid-worker")
+            captured["downloads"] = store.record_download("vid-worker", audio_path=tmp_path / "a.flac")
+            captured["counts"] = store.state_counts()
+        except BaseException as exc:  # noqa: BLE001 -- record, do not swallow silently
+            captured["error"] = repr(exc)
+
+    try:
+        # When that store is used from another thread
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+        # And the main thread reads back what the worker wrote
+        main_seen = store.already_seen("vid-worker")
+    finally:
+        store.close()
+
+    # Then no "SQLite objects created in a thread..." error occurred and the
+    # cross-thread write is visible from the main thread.
+    assert "error" not in captured, captured.get("error")
+    assert captured["seen"] is True
+    assert captured["downloads"] is True
+    assert captured["counts"] == {"seen": {"listed": 1}, "downloads": {"downloaded": 1}}
+    assert main_seen is True

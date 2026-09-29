@@ -5,7 +5,8 @@ description = "YouTube Music taste pipeline: download playlist audio, embed trac
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "yt-dlp>=2026.3.3",
+    "yt-dlp[default,curl-cffi]>=2026.3.3",
+    "bgutil-ytdlp-pot-provider",
     "torch>=2.2",
     "transformers>=4.45",
     "numpy",
@@ -29,6 +30,28 @@ dependencies = [
 dev = [
     "pytest-asyncio>=0.24",
 ]
+
+# ─────────────────────────────────────────────────────────────────
+# uv settings. Copy instead of hardlink: the uv cache and the .venv can be
+# on different filesystems, where hardlinks are impossible — copy mode makes
+# the fallback intentional and silences the hardlink warning.
+# ─────────────────────────────────────────────────────────────────
+[tool.uv]
+link-mode = "copy"
+
+# ─────────────────────────────────────────────────────────────────
+# PyTorch CUDA wheels (NVIDIA). The default PyPI torch is CPU-only; this
+# pins torch to the CUDA 12.8 index so the CLAP embedder can use the GPU
+# (config `device = "auto"`). CUDA wheels still run on CPU when no NVIDIA
+# GPU is present, so this is safe on machines without CUDA.
+# ─────────────────────────────────────────────────────────────────
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
 
 [build-system]
 requires = ["hatchling"]

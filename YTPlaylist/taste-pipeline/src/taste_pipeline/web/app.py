@@ -21,6 +21,7 @@ from taste_pipeline.web.routes_check import router as check_router
 from taste_pipeline.web.routes_index import build_index_status
 from taste_pipeline.web.routes_index import router as index_router
 from taste_pipeline.web.routes_jobs import router as jobs_router
+from taste_pipeline.web.routes_jobs import run_row_context
 from taste_pipeline.web.routes_settings import router as settings_router
 from taste_pipeline.web.routes_triage import router as triage_router
 
@@ -61,12 +62,28 @@ def create_app(config: Config, *, config_path: Path | None = None) -> FastAPI:
     templates = Jinja2Templates(directory=_TEMPLATES_DIR)
 
     async def _index(request: Request) -> Response:
-        """Render the dashboard with the current library index status panel."""
+        """Render the dashboard with the index status panel and server-rendered run history."""
         config = cast("Config", app.state.config)
         index_status = build_index_status(config)
-        return templates.TemplateResponse(request, "dashboard.html", {"index_status": index_status})
+        runner = cast("JobRunner", app.state.runner)
+        jobs = [run_row_context(job) for job in runner.list()]
+        return templates.TemplateResponse(
+            request,
+            "dashboard.html",
+            {"index_status": index_status, "jobs": jobs},
+        )
+
+    async def _index_page(request: Request) -> Response:
+        """Render the dedicated Index page: index-scan status panel + live progress UI."""
+        config = cast("Config", app.state.config)
+        return templates.TemplateResponse(
+            request,
+            "index.html",
+            {"index_status": build_index_status(config)},
+        )
 
     _ = app.get("/")(_index)
+    _ = app.get("/index")(_index_page)
     app.include_router(api_router)
     app.include_router(index_router)
     app.include_router(jobs_router)

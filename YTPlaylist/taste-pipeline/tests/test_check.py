@@ -7,13 +7,13 @@ Two surfaces:
   query vector + library matrix + ids + thresholds; returns a
   :class:`CheckResult`. Never touches disk.
 - :func:`check_audio_file` -- thin I/O wrapper: embeds one audio file
-  (single-track path), refreshes the library index, loads calibration
-  thresholds, then delegates to the pure function. Mirrors
+  (single-track path), loads the persisted library index, loads
+  calibration thresholds, then delegates to the pure function. Mirrors
   :mod:`taste_pipeline.calibrate`'s lazy-import pattern so tests can
-  monkey-patch ``embed.embed_track`` and ``library.scan_library`` and
+  monkey-patch ``embed.embed_track`` and ``library.load_index`` and
   observe the patches.
 
-No real CLAP model is loaded in any test -- the embedder and scanner
+No real CLAP model is loaded in any test -- the embedder and index loader
 are monkey-patched to return deterministic synthetic ``(n, 512)`` and
 ``(512,)`` matrices.
 """
@@ -224,18 +224,16 @@ def test_check_track_against_library_top_k_clamped_to_library_size() -> None:
     )
 
 
-def test_check_audio_file_invokes_embed_and_scan_library(
+def test_check_audio_file_embeds_query_and_loads_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: embed_audio_file -> embed + scan + load_thresholds -> compare.
+    """End-to-end: check_audio_file -> embed query + load index + load_thresholds -> compare.
 
-    Verifies the integration contract: ``check_audio_file`` calls
-    :func:`library.scan_library` with the real ``embed.embed_track``
-    embedder (looked up by attribute, not cached at import time), and
-    loads calibration thresholds via ``calibrate.load_thresholds``. The
-    embedder and scanner are monkey-patched to return a synthetic
-    ``LibraryIndex`` so no real CLAP model is loaded.
+    Verifies the integration contract: ``check_audio_file`` embeds ONLY the
+    query track and reads the persisted index via :func:`library.load_index`
+    (looked up by attribute, not cached at import time). The embedder and
+    loader are monkey-patched so no real CLAP model is loaded.
     """
     cfg = _make_config(tmp_path)
 
@@ -246,26 +244,22 @@ def test_check_audio_file_invokes_embed_and_scan_library(
         _manifest={f"track_{i}.flac": {"mtime": 0.0, "size": 0, "vector_id": i} for i in range(4)},
     )
     fake_track_embedding = _aligned_vector(vectors[0])
+    embed_calls: list[Path] = []
 
-    def fake_embedder(_path: Path, _config: ConfigType) -> np.ndarray:
+    def fake_embedder(path: Path, _config: ConfigType) -> np.ndarray:
+        embed_calls.append(path)
         return fake_track_embedding
 
-    scan_calls: list[tuple[Config, object]] = []
+    load_calls: list[Config] = []
 
-    def fake_scan_library(config: Config, embedder: object) -> LibraryIndex:
-        scan_calls.append((config, embedder))
-        # The fake embedder MUST be the one the check module passed --
-        # this is the integration seam the lazy-import pattern protects.
-        assert embedder is fake_embedder, (
-            f"check passed a different embedder than embed.embed_track "
-            f"(got {embedder!r}); the monkey-patch contract is broken"
-        )
+    def fake_load_index(config: Config) -> LibraryIndex:
+        load_calls.append(config)
         return index
 
     from taste_pipeline import calibrate, embed, library  # noqa: PLC0415 -- lazy: under test
 
     monkeypatch.setattr(embed, "embed_track", fake_embedder)
-    monkeypatch.setattr(library, "scan_library", fake_scan_library)
+    monkeypatch.setattr(library, "load_index", fake_load_index)
     # Stub load_thresholds to return None (no calibration).
     monkeypatch.setattr(calibrate, "load_thresholds", lambda _data_dir: None)
 
@@ -274,11 +268,13 @@ def test_check_audio_file_invokes_embed_and_scan_library(
     audio_path.write_bytes(b"FAKE_AUDIO_BYTES")
     result = check_audio_file(audio_path, cfg)
 
-    # Then: scan_library was called exactly once with the patched embedder
-    assert len(scan_calls) == 1, f"scan_library called {len(scan_calls)} times, expected 1"
-    assert scan_calls[0][0] is cfg, "scan_library received the wrong config"
+    # Then: load_index was called exactly once with the config
+    assert len(load_calls) == 1, f"load_index called {len(load_calls)} times, expected 1"
+    assert load_calls[0] is cfg, "load_index received the wrong config"
+    # And: only the query track was embedded -- the library is NOT re-embedded
+    assert embed_calls == [audio_path], f"expected only the query to be embedded, got {embed_calls!r}"
 
-    # And: the result is a verdict (no_library because no calibration -> uncertain)
+    # And: the result is a verdict (no calibration -> uncertain)
     assert isinstance(result, CheckResult)
     # No thresholds loaded -> uncertain verdict
     assert result.verdict == "uncertain"
@@ -298,13 +294,13 @@ def test_check_audio_file_returns_no_library_when_count_zero(
     def fake_embedder(_path: Path, _config: ConfigType) -> np.ndarray:
         return _unit_vectors(1)[0]
 
-    def fake_scan_library(_config: Config, _embedder: object) -> LibraryIndex:
+    def fake_load_index(_config: Config) -> LibraryIndex:
         return index
 
     from taste_pipeline import calibrate, embed, library  # noqa: PLC0415 -- lazy: under test
 
     monkeypatch.setattr(embed, "embed_track", fake_embedder)
-    monkeypatch.setattr(library, "scan_library", fake_scan_library)
+    monkeypatch.setattr(library, "load_index", fake_load_index)
     monkeypatch.setattr(calibrate, "load_thresholds", lambda _data_dir: None)
 
     audio_path = tmp_path / "fake.flac"
@@ -333,7 +329,7 @@ def test_check_audio_file_propagates_thresholds_from_calibrate(
     def fake_embedder(_path: Path, _config: ConfigType) -> np.ndarray:
         return fake_track_embedding
 
-    def fake_scan_library(_config: Config, _embedder: object) -> LibraryIndex:
+    def fake_load_index(_config: Config) -> LibraryIndex:
         return index
 
     # Thresholds calibrated with VERY low keep (so 0.95 always matches) and high skip
@@ -342,7 +338,7 @@ def test_check_audio_file_propagates_thresholds_from_calibrate(
     from taste_pipeline import calibrate, embed, library  # noqa: PLC0415 -- lazy: under test
 
     monkeypatch.setattr(embed, "embed_track", fake_embedder)
-    monkeypatch.setattr(library, "scan_library", fake_scan_library)
+    monkeypatch.setattr(library, "load_index", fake_load_index)
     monkeypatch.setattr(calibrate, "load_thresholds", lambda _data_dir: fake_thresholds)
 
     audio_path = tmp_path / "fake.flac"
@@ -354,6 +350,52 @@ def test_check_audio_file_propagates_thresholds_from_calibrate(
     assert result.threshold_skip == 0.2
     assert result.verdict == "matches", (
         f"high-similarity query with keep_threshold=0.5 should match, got {result!r}"
+    )
+
+
+def test_check_audio_file_uses_row_order_not_sorted_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The library ids are taken in row (vector_id) order, not sorted manifest order.
+
+    After an incremental index build the manifest insertion order need not be
+    globally sorted, so ``sorted(manifest)`` would desync ids from vector rows.
+    The manifest here is deliberately inserted with ``a.flac`` (vector_id 1)
+    before ``z.flac`` (vector_id 0); the query is aligned to row 0, so the top
+    match MUST resolve to ``z.flac`` when ids follow row order.
+    """
+    cfg = _make_config(tmp_path)
+
+    vectors = _unit_vectors(2, seed=90)
+    index = LibraryIndex(
+        _vectors=vectors,
+        _manifest={
+            "a.flac": {"mtime": 0.0, "size": 0, "vector_id": 1},
+            "z.flac": {"mtime": 0.0, "size": 0, "vector_id": 0},
+        },
+    )
+    query = _aligned_vector(vectors[0])  # cosine ~0.95 to row 0 (z.flac)
+
+    def fake_embedder(_path: Path, _config: ConfigType) -> np.ndarray:
+        return query
+
+    def fake_load_index(_config: Config) -> LibraryIndex:
+        return index
+
+    from taste_pipeline import calibrate, embed, library  # noqa: PLC0415 -- lazy: under test
+
+    monkeypatch.setattr(embed, "embed_track", fake_embedder)
+    monkeypatch.setattr(library, "load_index", fake_load_index)
+    monkeypatch.setattr(calibrate, "load_thresholds", lambda _data_dir: None)
+
+    audio_path = tmp_path / "fake.flac"
+    audio_path.write_bytes(b"FAKE_AUDIO_BYTES")
+    result = check_audio_file(audio_path, cfg)
+
+    # Row order is [z.flac, a.flac]; the aligned row-0 track wins the top slot.
+    assert result.top_k[0][1] == "z.flac", (
+        f"top match must follow row order (z.flac at vector_id 0), got {result.top_k[0]}"
     )
 
 

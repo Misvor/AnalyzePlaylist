@@ -281,3 +281,47 @@ tr:nth-child(even) td {
   margin-top: 8px;
   width: auto;
 }
+
+/* ── Index page (live scan progress + queue) ──────────────────────── */
+#index-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.index-current {
+  margin-top: 4px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.index-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #444;
+}
+
+.index-meta-sep,
+.index-status-sep {
+  margin: 0 6px;
+  color: #999;
+}
+
+#index-queue-list {
+  margin: 4px 0 0 0;
+  padding-left: 24px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.index-queue-remaining {
+  font-size: 12px;
+  font-weight: normal;
+  color: #666;
+}

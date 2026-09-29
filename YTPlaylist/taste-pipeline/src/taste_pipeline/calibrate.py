@@ -1,9 +1,8 @@
 """Threshold calibration for taste classification.
 
-Calibration walks the user's like-library, embeds every track through the
-CLAP model (the same embedder used by :mod:`taste_pipeline.library`), then
-derives two cosine-similarity quantiles from the pairwise similarity
-matrix:
+Calibration reads the persisted like-library index built by
+:func:`taste_pipeline.library.scan_library` and derives two
+cosine-similarity quantiles from the pairwise similarity matrix:
 
 - ``keep_threshold`` -- a high-percentile similarity (default 0.75). If a
   freshly downloaded track has cosine similarity ``>= keep_threshold``
@@ -27,18 +26,18 @@ Public surface:
 - :func:`load_thresholds` -- inverse of :func:`persist_thresholds`; returns
   ``None`` when the file is absent so callers can branch on "not yet
   calibrated".
-- :func:`run_calibration` -- the orchestrator: scans the like-library,
-  embeds via :func:`taste_pipeline.embed.embed_track`, computes
-  thresholds, persists, reports progress through the injected
-  ``report`` callback. Returns the persisted thresholds dict so the
-  caller (the ``calibrate`` job factory) can surface them to the UI.
+- :func:`run_calibration` -- the orchestrator: loads the already-built
+  index via :func:`taste_pipeline.library.load_index` (it never walks or
+  embeds the library), computes thresholds, persists, reports progress
+  through the injected ``report`` callback. Returns the persisted
+  thresholds dict so the caller (the ``calibrate`` job factory) can
+  surface them to the UI.
 
-This module imports :mod:`taste_pipeline.embed` and
-:mod:`taste_pipeline.library` lazily inside :func:`run_calibration` --
-mirroring the ``job_factories`` pattern -- so test code can
-``monkeypatch.setattr`` the source modules before :func:`run_calibration`
-runs and observe the patched functions without the calibrate module
-caching its own references.
+This module imports :mod:`taste_pipeline.library` lazily inside
+:func:`run_calibration` -- mirroring the ``job_factories`` pattern -- so
+test code can ``monkeypatch.setattr`` the source module before
+:func:`run_calibration` runs and observe the patched functions without
+the calibrate module caching its own references.
 """
 
 from __future__ import annotations
@@ -116,17 +115,26 @@ def compute_thresholds(
     return {"keep_threshold": keep_threshold, "skip_threshold": skip_threshold}
 
 
-def persist_thresholds(data_dir: Path, thresholds: dict[str, float]) -> Path:
+def persist_thresholds(
+    data_dir: Path,
+    thresholds: dict[str, float],
+    *,
+    sample_count: int | None = None,
+) -> Path:
     """Write the thresholds dict to ``<data_dir>/thresholds.json`` and return the path.
 
     The JSON payload includes ``computed_at`` (ISO-8601 UTC) so the UI
     can render "Calibrated N hours ago" without recomputing from file
-    mtime. Atomic write is NOT used here because calibration is rare and
+    mtime. When ``sample_count`` is provided it is recorded alongside the
+    thresholds so the UI can warn that a small sample is statistically
+    noisy. Atomic write is NOT used here because calibration is rare and
     the partial-write failure mode is recoverable on the next run.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = dict(thresholds)
     payload["computed_at"] = datetime.now(UTC).isoformat()
+    if sample_count is not None:
+        payload["sample_count"] = sample_count
     out_path = data_dir / _THRESHOLDS_FILE_NAME
     _ = out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return out_path
@@ -160,39 +168,36 @@ def run_calibration(
     config: Config,
     report: Callable[[float, str], None],
 ) -> dict[str, float]:
-    """Scan the like-library, embed, derive thresholds, and persist.
+    """Load the persisted index, derive thresholds, and persist them.
 
     The ``report`` callback follows the same ``(progress, message)``
     contract every other pipeline pass uses; the runner turns those into
     SSE events for the dashboard's progress bar.
 
     Args:
-        config: Pipeline configuration. ``config.like_library_dir`` is
-            scanned; ``config.data_dir`` is where thresholds.json is
-            written.
+        config: Pipeline configuration. The index is read from
+            ``config.data_dir``; ``config.data_dir`` is where
+            thresholds.json is written. ``config.like_library_dir`` is
+            NOT walked -- run the index job first.
         report: ``Callable[[float, str], None]`` -- the runner's
             progress sink. Called at 0.0 / 0.3 / 0.9 / 1.0 with
             human-readable status messages.
 
     Returns:
         The persisted thresholds dict ``{"keep_threshold", "skip_threshold"}``.
-
-    Raises:
-        ValueError: The embedder returned vectors of the wrong shape (the
-            underlying :func:`library.scan_library` validates this).
     """
     # Lazy imports mirror the ``job_factories`` pattern: tests monkey-patch
-    # ``taste_pipeline.embed.embed_track`` and ``taste_pipeline.library.scan_library``
-    # before submitting the job and rely on module-attribute lookup at call time.
-    from taste_pipeline import embed, library  # noqa: PLC0415 -- lazy: monkey-patch works
+    # ``taste_pipeline.library.load_index`` before submitting the job and rely
+    # on module-attribute lookup at call time.
+    from taste_pipeline import library  # noqa: PLC0415 -- lazy: monkey-patch works
 
-    report(0.0, "scanning library")
-    index = library.scan_library(config, embed.embed_track)
+    report(0.0, "loading index")
+    index = library.load_index(config)
     count = index.count()
-    report(0.3, f"embedded {count} tracks")
+    report(0.3, f"indexed {count} tracks")
     vectors = index.vectors()
     thresholds = compute_thresholds(vectors)
     report(0.9, "persisting thresholds")
-    _ = persist_thresholds(config.data_dir, thresholds)
+    _ = persist_thresholds(config.data_dir, thresholds, sample_count=count)
     report(1.0, "calibration complete")
     return thresholds

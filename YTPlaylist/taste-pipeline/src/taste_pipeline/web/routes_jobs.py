@@ -1,12 +1,16 @@
 r"""Job control + SSE progress endpoints for the taste-pipeline web UI.
 
-Mounts four read/write endpoints under ``/api/jobs``:
+Mounts these read/write endpoints under ``/api/jobs``:
 
 - ``POST /api/jobs`` body ``{"kind": "feed"|"metadata"|"download"|"index"|"calibrate"}``
   -> creates a new :class:`~taste_pipeline.web.jobs.Job` via the runner
   exposed on ``app.state.runner`` and returns the job JSON (status 201).
+  An optional ``batch_size`` (int >= 1) on an ``index`` job caps how many
+  new files that run embeds.
 - ``GET /api/jobs`` -> list of all jobs newest-first (status 200).
 - ``GET /api/jobs/{job_id}`` -> single job JSON (status 200; 404 on unknown id).
+- ``POST /api/jobs/{job_id}/pause`` -> pause the job, job JSON (404 on unknown id).
+- ``POST /api/jobs/{job_id}/cancel`` -> cancel the job, job JSON (404 on unknown id).
 - ``GET /api/jobs/{job_id}/events`` -> Server-Sent Events stream
   (``text/event-stream``) emitting one ``data: {"event": "progress",
   "progress": float, "message": str}\\n\\n`` per progress update and a
@@ -43,16 +47,18 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid as _uuid
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
+    from fastapi.templating import Jinja2Templates
+
     from taste_pipeline.config import Config
-    from taste_pipeline.web.jobs import Job, JobRunner
+    from taste_pipeline.web.jobs import Job, JobRunner, ProgressReporter
 
 router = APIRouter(prefix="/api")
 
@@ -64,9 +70,13 @@ router = APIRouter(prefix="/api")
 # (the check_url factory does this with a CheckResult dict); ``None`` is
 # the "no payload" signal. Populated by the pipeline-wiring task; tests
 # register fakes directly.
-JOB_FACTORIES: dict[str, Callable[[Callable[[float, str], None]], dict[str, object] | None]] = {}
+JOB_FACTORIES: dict[str, Callable[[ProgressReporter], dict[str, object] | None]] = {}
 
-_TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "cancelled"})
+_TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "cancelled", "paused"})
+
+# Ticks (x 50 ms) to wait for the worker to persist its final state before the
+# SSE `done` event; pause/cancel set the terminal status synchronously.
+_FINALIZE_WAIT_TICKS: Final[int] = 200
 
 # Single source of truth for valid job kinds -- checked at runtime in
 # :func:`create_job` against the parsed JSON body. Tests should NOT
@@ -87,6 +97,26 @@ def _job_to_payload(job: Job) -> dict[str, object]:
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
         "error": job.error,
         "result": job.result,
+        "detail": job.detail,
+    }
+
+
+def run_row_context(job: Job) -> dict[str, object]:
+    """Render a Job as the flat dict the ``_run_row.html`` partial consumes.
+
+    Stringifies the id, converts ``progress`` to a 0.0-100.0 percentage,
+    formats datetimes (empty string when unset), flattens ``error`` to
+    ``""`` when ``None``, and sets ``terminal`` for final states.
+    """
+    return {
+        "id": str(job.id),
+        "kind": job.kind,
+        "status": job.status,
+        "progress_pct": round(job.progress * 100, 1),
+        "started": job.started_at.strftime("%Y-%m-%d %H:%M:%S") if job.started_at else "",
+        "finished": job.finished_at.strftime("%Y-%m-%d %H:%M:%S") if job.finished_at else "",
+        "error": job.error or "",
+        "terminal": job.status in _TERMINAL_STATUSES,
     }
 
 
@@ -95,9 +125,26 @@ def _sse(payload: dict[str, object]) -> str:
     return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
 
-@router.post("/jobs", status_code=status.HTTP_201_CREATED)
-async def create_job(request: Request) -> dict[str, object]:
-    """Submit a new job of the given ``kind``; returns the job JSON with status 201.
+def _parse_batch_size(raw: object) -> int | None:
+    """Validate the optional ``batch_size`` body field; ``None`` when absent.
+
+    Raises:
+        HTTPException: 422 when present but not a positive integer (bools,
+            floats, strings, ``0`` and negatives are all rejected).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="'batch_size' must be an integer >= 1",
+        )
+    return raw
+
+
+@router.post("/jobs", status_code=status.HTTP_201_CREATED, response_model=None)
+async def create_job(request: Request) -> dict[str, object] | Response:
+    """Submit a new job of the given ``kind``; returns the created job with status 201.
 
     The JSON body ``{"kind": "feed"|"metadata"|"download"|"index"}`` is
     parsed manually via :meth:`Request.json` (Starlette), which works
@@ -107,6 +154,15 @@ async def create_job(request: Request) -> dict[str, object]:
     that sends a proper JSON body. Form-encoded bodies, empty bodies,
     and malformed JSON all return 422 -- the endpoint is JSON-only by
     contract.
+
+    The response is content-negotiated on the ``HX-Request`` header:
+
+    - ``HX-Request: true`` (htmx) -> ``text/html`` rendered from the
+      ``_run_row.html`` partial (one ``<tr>``) with status 201, so the
+      dashboard's ``hx-target="#run-history-body" hx-swap="afterbegin"``
+      inserts a real table row.
+    - any other request -> the job JSON via :func:`_job_to_payload` with
+      status 201, preserving the plain-JSON API contract.
 
     On the first request, lazily populates :data:`JOB_FACTORIES` with
     the real pipeline factories bound to the app's ``config`` and a
@@ -154,22 +210,42 @@ async def create_job(request: Request) -> dict[str, object]:
             detail=f"unknown kind {kind!r}; valid kinds: {sorted(_KNOWN_KINDS)}",
         )
 
+    batch_size = _parse_batch_size(payload.get("batch_size"))
+
     app = cast("FastAPI", request.app)
     config = cast("Config", app.state.config)
     runner = cast("JobRunner", app.state.runner)
-    if not JOB_FACTORIES:
-        from taste_pipeline.state import StateStore  # noqa: PLC0415 -- lazy construction per app
-        from taste_pipeline.web.job_factories import register_factories  # noqa: PLC0415 -- direct submodule
+    if kind == "index" and batch_size is not None:
+        from taste_pipeline.web.job_factories import make_index_factory  # noqa: PLC0415 -- direct submodule
 
-        state = StateStore(config.data_dir)
-        register_factories(JOB_FACTORIES, config, state)
-    factory = JOB_FACTORIES.get(kind)
-    if factory is None:  # pragma: no cover -- defensive guard against unregistered _KNOWN_KINDS members
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"no factory registered for job kind {kind!r}",
+        factory: Callable[[ProgressReporter], dict[str, object] | None] = make_index_factory(
+            config, batch_size=batch_size
         )
+    else:
+        if not JOB_FACTORIES:
+            from taste_pipeline.state import StateStore  # noqa: PLC0415 -- lazy construction per app
+            from taste_pipeline.web.job_factories import register_factories  # noqa: PLC0415
+
+            state = StateStore(config.data_dir)
+            register_factories(JOB_FACTORIES, config, state)
+        registered = JOB_FACTORIES.get(kind)
+        if registered is None:  # pragma: no cover
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"no factory registered for job kind {kind!r}",
+            )
+        factory = registered
     job = await runner.submit(kind, factory)
+    # htmx rows target #run-history-body with afterbegin: return a real <tr>
+    # fragment so the dashboard shows a progress bar + badge immediately.
+    if request.headers.get("hx-request", "").lower() == "true":
+        templates = cast("Jinja2Templates", cast("FastAPI", request.app).state.templates)
+        return templates.TemplateResponse(
+            request,
+            "_run_row.html",
+            {"job": run_row_context(job)},
+            status_code=status.HTTP_201_CREATED,
+        )
     return _job_to_payload(job)
 
 
@@ -194,6 +270,41 @@ async def get_job(request: Request, job_id: str) -> dict[str, object]:
         return _job_to_payload(runner.get(parsed_id))
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/jobs/{job_id}/pause")
+async def pause_job(request: Request, job_id: str) -> dict[str, object]:
+    """Cooperatively pause a job and return its JSON; 404 when the id is unknown."""
+    return _stop_job(request, job_id, "pause")
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(request: Request, job_id: str) -> dict[str, object]:
+    """Cooperatively cancel a job and return its JSON; 404 when the id is unknown."""
+    return _stop_job(request, job_id, "cancel")
+
+
+def _stop_job(request: Request, job_id: str, action: Literal["pause", "cancel"]) -> dict[str, object]:
+    """Resolve the runner, apply the pause/cancel action, and return the job JSON.
+
+    Mirrors :func:`get_job`'s 404 mapping: an unparseable id raises
+    :class:`ValueError`, an unknown id raises :class:`KeyError`; both become
+    a 404.
+    """
+    app = cast("FastAPI", request.app)
+    runner = cast("JobRunner", app.state.runner)
+    try:
+        parsed_id = _parse_uuid(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    try:
+        if action == "pause":
+            runner.pause(parsed_id)
+        else:
+            runner.cancel(parsed_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _job_to_payload(runner.get(parsed_id))
 
 
 @router.get("/jobs/{job_id}/events")
@@ -234,6 +345,7 @@ async def stream_job_events(request: Request, job_id: str) -> StreamingResponse:
                         "event": "progress",
                         "progress": current.progress,
                         "message": message,
+                        "detail": current.detail,
                     }
                 )
                 last_log_count = len(current.log_lines)
@@ -245,10 +357,18 @@ async def stream_job_events(request: Request, job_id: str) -> StreamingResponse:
                         "event": "progress",
                         "progress": current.progress,
                         "message": "",
+                        "detail": current.detail,
                     }
                 )
                 last_progress = current.progress
             if current.status in _TERMINAL_STATUSES:
+                # pause/cancel mark the job terminal synchronously, but the
+                # worker may still be flushing its final checkpoint; wait
+                # (bounded) so a refresh after `done` sees persisted state.
+                for _ in range(_FINALIZE_WAIT_TICKS):
+                    if runner.is_finalized(parsed_id):
+                        break
+                    await asyncio.sleep(0.05)
                 yield _sse(
                     {
                         "event": "done",

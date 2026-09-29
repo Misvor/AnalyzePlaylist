@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
+from taste_pipeline import library as library_module
 from taste_pipeline.config import Config
-from taste_pipeline.library import scan_library
+from taste_pipeline.library import ScanProgress, load_index, scan_library
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -230,3 +231,236 @@ def test_embedder_wrong_shape_raises_value_error(tmp_path: Path) -> None:
     # When scanning, the mismatch is reported rather than silently stored
     with pytest.raises(ValueError, match="expected"):
         scan_library(config, bad_embedder)
+
+
+def test_scan_reports_scan_progress_once_per_file(tmp_path: Path) -> None:
+    # Given a library with three audio files
+    config = _make_config(tmp_path)
+    like_dir = config.like_library_dir
+    for name in ("a.mp3", "b.flac", "c.wav"):
+        _write_audio(like_dir, name)
+    records: list[ScanProgress] = []
+
+    # When scanning with an on_progress callback
+    scan_library(config, _fake_embedder, on_progress=records.append)
+
+    # Then the callback fired once per file, at the START of each embed:
+    # `processed` counts finished files (0-based), `current` names the file
+    # about to be embedded, and `remaining` still includes it.
+    assert len(records) == 3, f"expected one progress record per file, got {records!r}"
+    assert [record.processed for record in records] == [0, 1, 2]
+    assert [record.current for record in records] == ["a.mp3", "b.flac", "c.wav"]
+    assert all(record.total == 3 for record in records)
+    assert [record.remaining for record in records] == [3, 2, 1]
+    # `upcoming` holds the POSIX rel paths after `current`, in scan order.
+    assert records[0].upcoming == ("b.flac", "c.wav")
+    assert records[1].upcoming == ("c.wav",)
+    assert records[2].upcoming == ()
+
+
+def test_scan_upcoming_is_capped_at_ten(tmp_path: Path) -> None:
+    # Given a library with twelve audio files (more than the cap)
+    config = _make_config(tmp_path)
+    like_dir = config.like_library_dir
+    for index in range(12):
+        _write_audio(like_dir, f"t{index:02d}.mp3")
+    records: list[ScanProgress] = []
+
+    # When scanning with an on_progress callback
+    scan_library(config, _fake_embedder, on_progress=records.append)
+
+    # Then the first record's upcoming list is capped at 10 while `remaining`
+    # still reports the true count, and the tail of the scan drains to empty.
+    assert len(records) == 12
+    first = records[0]
+    assert first.processed == 0
+    assert first.current == "t00.mp3"
+    assert first.remaining == 12
+    assert len(first.upcoming) == 10
+    assert first.upcoming[0] == "t01.mp3"
+    assert first.upcoming[-1] == "t10.mp3"
+    assert records[-1].upcoming == ()
+
+
+def test_scan_empty_library_does_not_report_progress(tmp_path: Path) -> None:
+    # Given a library with no audio files
+    config = _make_config(tmp_path)
+    records: list[ScanProgress] = []
+
+    # When scanning with an on_progress callback
+    scan_library(config, _fake_embedder, on_progress=records.append)
+
+    # Then the callback never fires (there are no files to process)
+    assert records == []
+
+
+def test_scan_checkpoints_are_readable_via_load_index(tmp_path: Path) -> None:
+    # Given a library with three audio files
+    config = _make_config(tmp_path)
+    like_dir = config.like_library_dir
+    for name in ("a.mp3", "b.flac", "c.wav"):
+        _write_audio(like_dir, name)
+
+    # When scanning
+    scanned = scan_library(config, _fake_embedder)
+
+    # Then the checkpoint artifacts exist and load_index returns the same index
+    assert (config.data_dir / "index" / "library_manifest.json").is_file()
+    assert (config.data_dir / "index" / "library_vectors.npy").is_file()
+    loaded = load_index(config)
+    assert loaded.count() == scanned.count() == 3
+    assert np.array_equal(loaded.vectors(), scanned.vectors())
+    assert loaded.manifest() == scanned.manifest()
+    assert loaded.ids() == scanned.ids()
+
+
+def test_load_index_missing_artifacts_returns_empty(tmp_path: Path) -> None:
+    # Given a config whose index directory has no artifacts
+    config = _make_config(tmp_path)
+
+    # When loading the index
+    index = load_index(config)
+
+    # Then an empty, well-formed index is returned (no walk, no error)
+    assert index.count() == 0
+    assert index.vectors().shape == (0, _EMBED_DIM)
+    assert index.manifest() == {}
+    assert index.ids() == []
+    assert index.complete is True
+
+
+def test_load_index_never_calls_the_embedder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given a persisted index
+    config = _make_config(tmp_path)
+    _write_audio(config.like_library_dir, "a.mp3")
+    scan_library(config, _fake_embedder)
+
+    # When the embedder path is poisoned and load_index is called
+    def exploding_embedder(*_args: object, **_kwargs: object) -> np.ndarray:
+        message = "load_index must never embed"
+        raise AssertionError(message)
+
+    monkeypatch.setattr("taste_pipeline.library._embed_one", exploding_embedder)
+
+    # Then load_index still succeeds without touching the embedder
+    index = load_index(config)
+    assert index.count() == 1
+
+
+def test_resume_after_max_new_files_embeds_only_remaining(tmp_path: Path) -> None:
+    # Given a four-file library, of which the first two were indexed in a prior batch
+    config = _make_config(tmp_path)
+    like_dir = config.like_library_dir
+    for name in ("a.mp3", "b.mp3", "c.mp3", "d.mp3"):
+        _write_audio(like_dir, name)
+    embedder = _CountingEmbedder()
+    first = scan_library(config, embedder, max_new_files=2)
+    assert len(embedder.calls) == 2
+    assert first.complete is False
+
+    # When the scan is resumed with another two-file batch
+    embedder.calls.clear()
+    second = scan_library(config, embedder, max_new_files=2)
+
+    # Then the already-indexed files are reused and only the remaining two embedded
+    assert [path.name for path in embedder.calls] == ["c.mp3", "d.mp3"]
+    assert second.count() == 4
+    # And ids() are in row (walk) order, not re-sorted manifest order
+    assert second.ids() == ["a.mp3", "b.mp3", "c.mp3", "d.mp3"]
+
+
+def test_should_stop_returns_partial_index_that_is_readable(tmp_path: Path) -> None:
+    # Given a four-file library and a stop signal that fires after two files
+    config = _make_config(tmp_path)
+    like_dir = config.like_library_dir
+    for name in ("a.mp3", "b.mp3", "c.mp3", "d.mp3"):
+        _write_audio(like_dir, name)
+    embedder = _CountingEmbedder()
+    calls = {"count": 0}
+
+    def should_stop() -> bool:
+        calls["count"] += 1
+        return calls["count"] >= 2
+
+    # When scanning with the stop signal
+    index = scan_library(config, embedder, should_stop=should_stop)
+
+    # Then the partial index is returned with complete=False ...
+    assert index.complete is False
+    assert index.count() == 2
+    # ... and it was checkpointed: load_index sees the same two rows
+    reloaded = load_index(config)
+    assert reloaded.count() == 2
+    assert reloaded.ids() == index.ids() == ["a.mp3", "b.mp3"]
+
+
+def test_max_new_files_returns_partial_index_that_is_readable(tmp_path: Path) -> None:
+    # Given a four-file library and a batch cap of two
+    config = _make_config(tmp_path)
+    like_dir = config.like_library_dir
+    for name in ("a.mp3", "b.mp3", "c.mp3", "d.mp3"):
+        _write_audio(like_dir, name)
+    embedder = _CountingEmbedder()
+
+    # When scanning with max_new_files=2
+    index = scan_library(config, embedder, max_new_files=2)
+
+    # Then exactly two files were embedded, the rest waiting for the next batch
+    assert len(embedder.calls) == 2
+    assert index.count() == 2
+    assert index.complete is False
+    assert load_index(config).count() == 2
+
+
+def test_torn_checkpoint_truncates_orphan_vector_rows(tmp_path: Path) -> None:
+    # Given a torn checkpoint: the vectors file has MORE rows than the manifest
+    # (vectors-first publish means the vector tail is always unreferenced).
+    config = _make_config(tmp_path)
+    index_dir = config.data_dir / "index"
+    manifest = {
+        "a.mp3": {"mtime": 1.0, "size": 10, "vector_id": 0},
+        "b.mp3": {"mtime": 2.0, "size": 20, "vector_id": 1},
+    }
+    (index_dir / "library_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    orphan_tail = np.arange(3 * _EMBED_DIM, dtype=np.float32).reshape(3, _EMBED_DIM)
+    np.save(index_dir / "library_vectors.npy", orphan_tail)
+
+    # When loading the index
+    loaded = load_index(config)
+
+    # Then it recovers by truncating the orphan tail to the manifest length
+    assert loaded.count() == 2
+    assert loaded.ids() == ["a.mp3", "b.mp3"]
+    assert np.array_equal(loaded.vectors(), orphan_tail[:2])
+
+
+def test_load_index_returns_empty_when_vectors_short_of_manifest(tmp_path: Path) -> None:
+    # Given an unrecoverable pair: fewer vector rows than manifest entries
+    config = _make_config(tmp_path)
+    index_dir = config.data_dir / "index"
+    manifest = {
+        "a.mp3": {"mtime": 1.0, "size": 10, "vector_id": 0},
+        "b.mp3": {"mtime": 2.0, "size": 20, "vector_id": 1},
+    }
+    (index_dir / "library_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    np.save(index_dir / "library_vectors.npy", np.zeros((1, _EMBED_DIM), dtype=np.float32))
+
+    # When loading
+    loaded = load_index(config)
+
+    # Then the index is reported empty rather than returning garbage
+    assert loaded.count() == 0
+
+
+def test_opus_files_are_indexed(tmp_path: Path) -> None:
+    # Given a .opus file (routes_index counts it, so library must agree)
+    config = _make_config(tmp_path)
+    _write_audio(config.like_library_dir, "track.opus")
+
+    # When scanning
+    index = scan_library(config, _fake_embedder)
+
+    # Then it is indexed like any other audio file
+    assert ".opus" in library_module._AUDIO_EXTENSIONS
+    assert index.count() == 1
+    assert index.ids() == ["track.opus"]

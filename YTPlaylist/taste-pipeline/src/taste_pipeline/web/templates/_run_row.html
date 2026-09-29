@@ -1,0 +1,12 @@
+<tr data-job-id="{{ job.id }}" data-status="{{ job.status }}">
+  <td>{{ job.kind }}</td>
+  <td><span class="badge" data-status="{{ job.status }}">{{ job.status }}</span></td>
+  <td>
+    <div class="progress-bar" data-status="{{ job.status }}">
+      <span class="fill" style="width: {{ job.progress_pct }}%"></span>
+    </div>
+  </td>
+  <td class="col-started">{{ job.started }}</td>
+  <td class="col-finished">{{ job.finished }}</td>
+  <td class="col-error">{{ job.error }}</td>
+</tr>

@@ -44,9 +44,9 @@ def _seed_library_manifest(
 
     The vectors file is left absent on purpose -- the routes_check
     endpoint only reads the manifest (mirrors the ``routes_index`` read
-    pattern). The check_url factory re-runs the real ``scan_library`` on
-    the URL path; tests that exercise the URL endpoint rely on the
-    full pipeline, not this seed.
+    pattern). ``check_audio_file`` loads the persisted index through
+    ``library.load_index``; the tests monkey-patch that function, so this
+    seed only satisfies the manifest-reading routes.
     """
     index_dir = config.data_dir / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
@@ -56,13 +56,13 @@ def _seed_library_manifest(
     _ = (index_dir / "library_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
-def _install_fake_embed_and_scan(
+def _install_fake_embed_and_index(
     monkeypatch: pytest.MonkeyPatch,
     *,
     library_count: int,
     track_similarity_seed: int = 42,
 ) -> None:
-    """Monkey-patch ``embed.embed_track`` and ``library.scan_library`` for check_audio_file.
+    """Monkey-patch ``embed.embed_track`` and ``library.load_index`` for check_audio_file.
 
     Returns a deterministic ``(n, 512)`` library matrix of unit vectors
     and a query embedding with a known alignment (cosine ~0.95 to the
@@ -85,7 +85,7 @@ def _install_fake_embed_and_scan(
     def fake_embedder(_path: Path, _config: ConfigType) -> np.ndarray:
         return track_emb
 
-    def fake_scan_library(_config: ConfigType, _embedder: object) -> LibraryIndex:
+    def fake_load_index(_config: ConfigType) -> LibraryIndex:
         return LibraryIndex(
             _vectors=matrix,
             _manifest={
@@ -94,7 +94,7 @@ def _install_fake_embed_and_scan(
         )
 
     monkeypatch.setattr(embed, "embed_track", fake_embedder)
-    monkeypatch.setattr(library, "scan_library", fake_scan_library)
+    monkeypatch.setattr(library, "load_index", fake_load_index)
     monkeypatch.setattr(calibrate, "load_thresholds", lambda _data_dir: None)
 
 
@@ -105,7 +105,7 @@ def test_post_check_file_with_valid_audio_returns_check_result(
     # and a monkey-patched embedder / scanner.
     cfg = _make_config(tmp_path)
     _seed_library_manifest(cfg, track_count=3)
-    _install_fake_embed_and_scan(monkeypatch, library_count=3)
+    _install_fake_embed_and_index(monkeypatch, library_count=3)
     client = TestClient(create_app(cfg))
 
     payload_bytes = b"FAKE_AUDIO_BYTES"
@@ -134,7 +134,7 @@ def test_post_check_file_with_valid_audio_returns_check_result(
 def test_post_check_file_rejects_non_audio_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _make_config(tmp_path)
     _seed_library_manifest(cfg, track_count=1)
-    _install_fake_embed_and_scan(monkeypatch, library_count=1)
+    _install_fake_embed_and_index(monkeypatch, library_count=1)
     client = TestClient(create_app(cfg))
 
     payload_bytes = b"hello world"
@@ -160,7 +160,7 @@ def test_post_check_file_rejects_non_audio_extension(tmp_path: Path, monkeypatch
 def test_post_check_file_rejects_invalid_base64(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _make_config(tmp_path)
     _seed_library_manifest(cfg, track_count=1)
-    _install_fake_embed_and_scan(monkeypatch, library_count=1)
+    _install_fake_embed_and_index(monkeypatch, library_count=1)
     client = TestClient(create_app(cfg))
 
     response = client.post(
@@ -218,7 +218,7 @@ def test_post_check_file_cleans_up_tmp_file_on_error(tmp_path: Path, monkeypatch
 def test_post_check_file_rejects_empty_filename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _make_config(tmp_path)
     _seed_library_manifest(cfg, track_count=1)
-    _install_fake_embed_and_scan(monkeypatch, library_count=1)
+    _install_fake_embed_and_index(monkeypatch, library_count=1)
     client = TestClient(create_app(cfg))
 
     response = client.post(

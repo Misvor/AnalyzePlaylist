@@ -287,6 +287,8 @@ EXPECTED_EDITABLE_FIELDS = frozenset(
         "chunk_seconds",
         "min_chunk_seconds",
         "sample_rate",
+        "device",
+        "proxy",
         "like_library_dir",
         "data_dir",
         "cookie_file",
@@ -325,6 +327,28 @@ def test_get_settings_returns_form_with_inputs_for_editable_fields(tmp_path: Pat
         assert f'name="{field_name}"' in body, (
             f"settings form missing an input/select for editable field {field_name!r}; "
             f"the user cannot edit a field that has no input"
+        )
+
+
+def test_get_settings_has_no_model_selection_field(tmp_path: Path) -> None:
+    # Given a real app built from a tmp config (the CLAP model is bundled and
+    # deliberately not configurable -- there is no option to pick weights)
+    client = _client(tmp_path)
+
+    # When requesting the settings page
+    response = client.get("/settings")
+
+    # Then no model-selection field row or input is rendered anywhere
+    assert response.status_code == 200
+    body = response.text
+    for forbidden in ("model_name", "model_local_dir"):
+        assert f'name="{forbidden}"' not in body, (
+            f"settings page rendered an input for {forbidden!r}; "
+            "the model is bundled and must not be user-selectable"
+        )
+        assert f'data-field="{forbidden}"' not in body, (
+            f"settings page rendered a row for {forbidden!r}; "
+            "the model is bundled and must not be user-selectable"
         )
 
 
@@ -872,3 +896,76 @@ def test_post_config_accepts_web_port_in_valid_range(tmp_path: Path) -> None:
     )
     reloaded = load_config(config_path)
     assert reloaded.web_port == 9999, f"on-disk web_port was not persisted; reload sees {reloaded.web_port!r}"
+
+
+# ── Compute device (GPU/CPU) select ──────────────────────────────────
+
+
+DEVICE_CHOICES = ("auto", "cuda", "mps", "cpu")
+
+
+def test_get_settings_renders_device_select_with_all_choices(tmp_path: Path) -> None:
+    # Given a real app whose config defaults device="auto"
+    client = _client(tmp_path)
+
+    # When requesting the settings page
+    response = client.get("/settings")
+
+    # Then the Pipeline section renders a <select name="device"> with exactly
+    # the four supported choices, auto first and auto selected (the default).
+    assert response.status_code == 200
+    body = response.text
+    match = re.search(
+        r'<select id="field-device" name="device">(.*?)</select>',
+        body,
+        flags=re.DOTALL,
+    )
+    assert match, 'settings form missing the device <select name="device">'
+    select_html = match.group(1)
+    for choice in DEVICE_CHOICES:
+        assert f'value="{choice}"' in select_html, (
+            f"device select missing the {choice!r} option; got {select_html!r}"
+        )
+    # auto is the config default and must be the selected option.
+    assert re.search(r'<option value="auto" selected>', select_html), (
+        f"device select must mark auto as selected by default; got {select_html!r}"
+    )
+    # auto must come before the concrete devices (the safe default first).
+    assert select_html.index('value="auto"') < select_html.index('value="cuda"')
+
+
+def test_post_config_accepts_device_and_persists(tmp_path: Path) -> None:
+    # Given a real app and a config file on disk
+    config_path = _write_config(tmp_path)
+    client = _client(tmp_path)
+
+    # When POSTing a valid device choice
+    response = client.post("/api/config", json={"device": "cpu"})
+
+    # Then 200, the response reflects the change, and the file persists it
+    assert response.status_code == 200, (
+        f"POST /api/config with device=cpu returned {response.status_code}; expected 200; "
+        f"body={response.text[:300]}"
+    )
+    assert response.json()["device"] == "cpu", (
+        f"response payload did not reflect the device update; got {response.json()['device']!r}"
+    )
+    reloaded = load_config(config_path)
+    assert reloaded.device == "cpu", f"on-disk device was not persisted; reload sees {reloaded.device!r}"
+
+
+def test_post_config_rejects_unknown_device(tmp_path: Path) -> None:
+    # Given a real app
+    client = _client(tmp_path)
+
+    # When POSTing an unsupported device value
+    response = client.post("/api/config", json={"device": "gpu"})
+
+    # Then 422 and the detail names device plus the allowed choices
+    assert response.status_code == 422, (
+        f"POST /api/config with device=gpu returned {response.status_code}; expected 422"
+    )
+    detail = response.json()["detail"]
+    assert "device" in detail, f"error detail should name device; got {detail!r}"
+    for choice in DEVICE_CHOICES:
+        assert choice in detail, f"error detail should list allowed choice {choice!r}; got {detail!r}"

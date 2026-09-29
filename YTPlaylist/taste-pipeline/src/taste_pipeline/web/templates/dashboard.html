@@ -56,34 +56,66 @@
       </tr>
     </thead>
     <tbody id="run-history-body">
+      {% for job in jobs %}{% include "_run_row.html" %}{% endfor %}
     </tbody>
   </table>
 
   <script>
     // Dashboard wiring: live SSE progress for running jobs + visible
-    // concurrent-same-kind rejection handling. The page is intentionally
-    // empty on load; rows are added when the user clicks a run button.
-    // attachJobStreamers() is re-run after every htmx swap so freshly
-    // inserted rows are wired to EventSource.
+    // concurrent-same-kind rejection handling. The server renders the run
+    // history into #run-history-body on load (in-memory jobs plus terminal
+    // records hydrated from <data_dir>/runs), so the table is no longer
+    // empty. attachJobStreamers() is re-run after every htmx swap so
+    // freshly inserted rows are wired to EventSource.
     (function () {
+      // A row already in a terminal status is finished: never open an SSE
+      // connection for it (a reloaded history has one row per past job).
+      var TERMINAL = { succeeded: true, failed: true, cancelled: true };
+
       function attachJobStreamers() {
         var rows = document.querySelectorAll('#run-history-body tr[data-job-id]');
         for (var i = 0; i < rows.length; i++) {
-          var row = rows[i];
+          // `let` scopes `row` per iteration so each listener closes over
+          // its own row (a `var` here would make every listener target the
+          // last row in the table).
+          let row = rows[i];
+          if (TERMINAL[row.dataset.status]) continue;
           if (row.dataset.streaming === '1') continue;
           row.dataset.streaming = '1';
-          var jobId = row.dataset.jobId;
-          var es = new EventSource('/api/jobs/' + jobId + '/events');
-          es.addEventListener('progress', function (evt) {
+          let es = new EventSource('/api/jobs/' + row.dataset.jobId + '/events');
+          // The server frames are unnamed `data: {"event": ...}` payloads, so
+          // they all dispatch as the default `message` event; branch on the
+          // JSON `event` field rather than on named SSE event types.
+          es.onmessage = function (evt) {
+            var data;
             try {
-              var data = JSON.parse(evt.data);
+              data = JSON.parse(evt.data);
+            } catch (e) { /* malformed event payload: ignore */ return; }
+            if (data.event === 'progress') {
               var bar = row.querySelector('.progress-bar > .fill');
               if (bar) bar.style.width = (data.progress * 100).toFixed(1) + '%';
-            } catch (e) { /* malformed event payload: ignore */ }
-          });
-          es.addEventListener('done', function () {
-            es.close();
-          });
+              var badge = row.querySelector('.badge');
+              if (badge && badge.textContent === 'queued') {
+                badge.textContent = 'running';
+                badge.dataset.status = 'running';
+              }
+            } else if (data.event === 'done') {
+              es.close();
+              var doneBadge = row.querySelector('.badge');
+              if (doneBadge) {
+                doneBadge.textContent = data.status;
+                doneBadge.dataset.status = data.status;
+              }
+              var pbar = row.querySelector('.progress-bar');
+              if (pbar) pbar.dataset.status = data.status;
+              var errCell = row.querySelector('.col-error');
+              if (errCell) errCell.textContent = data.error || '';
+              var finCell = row.querySelector('.col-finished');
+              if (finCell) finCell.textContent = new Date().toLocaleString();
+              // Mark terminal so a later re-scan never re-streams this row.
+              row.dataset.status = data.status;
+            }
+          };
         }
       }
 
@@ -109,9 +141,8 @@
         attachJobStreamers();
       });
 
-      // Initial pass: the page starts with an empty tbody, so this is a
-      // no-op on first load. The htmx:afterSwap handler covers every
-      // subsequent row insertion.
+      // Initial pass: wire any server-rendered running rows (e.g. a reload
+      // mid-job). Terminal rows are skipped by the TERMINAL guard above.
       attachJobStreamers();
     })();
   </script>

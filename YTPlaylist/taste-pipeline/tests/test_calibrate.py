@@ -11,10 +11,10 @@ Contract locked by these tests:
   shape (degenerate inputs get defensive defaults instead of raising).
 - :func:`persist_thresholds` / :func:`load_thresholds` round-trip
   correctly; an absent file loads as ``None`` (not an exception).
-- :func:`run_calibration` integrates with :mod:`taste_pipeline.embed`
-  and :mod:`taste_pipeline.library` via lazy imports so tests can
-  monkey-patch both modules without the calibrate module caching its
-  own references.
+- :func:`run_calibration` reads the persisted index via
+  :func:`taste_pipeline.library.load_index` (lazy import) so tests can
+  monkey-patch the source module without the calibrate module caching
+  its own reference. It never embeds the library.
 - :func:`run_calibration` reports progress through the injected
   ``report`` callback at the documented milestones (0.0 / 0.3 / 0.9 / 1.0).
 - :func:`run_calibration` persists the thresholds under
@@ -47,8 +47,6 @@ from taste_pipeline.library import LibraryIndex
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from taste_pipeline.config import Config as ConfigType
 
 
 def _write_minimal_config(tmp_path: Path) -> Path:
@@ -217,52 +215,38 @@ def test_load_thresholds_returns_none_for_malformed_json(tmp_path: Path) -> None
     assert result is None, f"load_thresholds must treat malformed JSON as 'missing', got {result!r}"
 
 
-def test_run_calibration_calls_scan_library_with_embedder_and_persists(
+def test_run_calibration_loads_index_and_persists_thresholds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end calibration: scan -> compute -> persist, all mocked.
+    """End-to-end calibration: load persisted index -> compute -> persist, all mocked.
 
-    Verifies the integration contract: ``run_calibration`` calls
-    :func:`library.scan_library` with the real ``embed.embed_track``
-    embedder (looked up by attribute, not cached at import time), and
-    persists the computed thresholds under ``config.data_dir``. The
-    embedder and scan_library are monkey-patched to return a synthetic
-    ``LibraryIndex`` so no real CLAP model is loaded.
+    Verifies the integration contract: ``run_calibration`` reads the
+    persisted index via :func:`library.load_index` (looked up by attribute,
+    not cached at import time) and persists the computed thresholds under
+    ``config.data_dir``. It never embeds the library.
     """
 
     cfg = _make_config(tmp_path)
 
-    # Build the synthetic LibraryIndex the patched scan_library will return.
+    # Build the synthetic LibraryIndex the patched load_index will return.
     vectors = _unit_vectors(8)
-    index = LibraryIndex(_vectors=vectors, _manifest={f"track_{i}.flac": {} for i in range(8)})
+    index = LibraryIndex(
+        _vectors=vectors,
+        _manifest={f"track_{i}.flac": {"mtime": 0.0, "size": 0, "vector_id": i} for i in range(8)},
+    )
+    load_calls: list[Config] = []
 
-    # The fake embedder is the object the calibrate module looks up via
-    # ``embed.embed_track`` at call time. Asserting identity inside the
-    # patched scan_library closure confirms the calibrate module passed
-    # the real embedder through (not its own reference).
-    def fake_embedder(path: Path, config: ConfigType) -> np.ndarray:
-        return vectors[0]
+    # The calibrate module imports ``from taste_pipeline import library``
+    # INSIDE run_calibration, so the monkey-patch must land on the source
+    # module attribute.
+    from taste_pipeline import library  # noqa: PLC0415 -- lazy: under test
 
-    # Patch scan_library + embed.embed_track. The calibrate module imports
-    # ``from taste_pipeline import embed, library`` INSIDE run_calibration,
-    # so the monkey-patches must land on those source module attrs.
-    from taste_pipeline import embed, library  # noqa: PLC0415 -- lazy: under test
-
-    monkeypatch.setattr(embed, "embed_track", fake_embedder)
-    scan_calls: list[tuple[Config, object]] = []
-
-    def fake_scan_library(config: Config, embedder: object) -> LibraryIndex:
-        scan_calls.append((config, embedder))
-        # The fake embedder MUST be the one the calibrate module passed --
-        # this is the integration seam the lazy-import pattern protects.
-        assert embedder is fake_embedder, (
-            f"calibrate passed a different embedder than embed.embed_track "
-            f"(got {embedder!r}); the monkey-patch contract is broken"
-        )
+    def fake_load_index(config: Config) -> LibraryIndex:
+        load_calls.append(config)
         return index
 
-    monkeypatch.setattr(library, "scan_library", fake_scan_library)
+    monkeypatch.setattr(library, "load_index", fake_load_index)
 
     # And capture the progress report calls (they should land at 0.0 / 0.3 / 0.9 / 1.0).
     reports: list[tuple[float, str]] = []
@@ -270,9 +254,9 @@ def test_run_calibration_calls_scan_library_with_embedder_and_persists(
     # When running calibration
     result = run_calibration(cfg, lambda progress, message: reports.append((progress, message)))
 
-    # Then: scan_library was called exactly once with the patched embedder
-    assert len(scan_calls) == 1, f"scan_library called {len(scan_calls)} times, expected 1"
-    assert scan_calls[0][0] is cfg, "scan_library received the wrong config"
+    # Then: load_index was called exactly once with the config
+    assert len(load_calls) == 1, f"load_index called {len(load_calls)} times, expected 1"
+    assert load_calls[0] is cfg, "load_index received the wrong config"
 
     # And: the thresholds JSON was persisted at <data_dir>/thresholds.json
     thresholds_path = cfg.data_dir / _THRESHOLDS_FILE_NAME
@@ -285,16 +269,22 @@ def test_run_calibration_calls_scan_library_with_embedder_and_persists(
         f"run_calibration return value {result!r} does not match loaded thresholds.json {loaded!r}"
     )
 
+    # And: the index size is recorded as sample_count alongside the thresholds
+    raw = json.loads(thresholds_path.read_text(encoding="utf-8"))
+    assert raw["sample_count"] == 8, (
+        f"thresholds.json must record the calibration sample_count (8), got {raw.get('sample_count')!r}"
+    )
+
     # And: progress was reported at the documented milestones
     progress_values = [p for p, _ in reports]
     assert progress_values[0] == 0.0, f"first progress must be 0.0, got {progress_values}"
     assert progress_values[-1] == 1.0, f"last progress must be 1.0, got {progress_values}"
     assert 0.3 in progress_values, f"0.3 milestone missing from progress reports: {progress_values}"
     assert 0.9 in progress_values, f"0.9 milestone missing from progress reports: {progress_values}"
-    # And the human-readable message for the embedded count is plausible
+    # And the human-readable message for the indexed count is plausible
     messages = [m for _, m in reports]
     assert any("8 tracks" in m for m in messages), (
-        f"report message for the embedded-count milestone must mention the track count "
+        f"report message for the indexed-count milestone must mention the track count "
         f"(8), got messages {messages!r}"
     )
 
@@ -311,16 +301,12 @@ def test_run_calibration_returns_defaults_for_empty_library(
     empty_vectors = np.empty((0, 512), dtype=np.float32)
     index = LibraryIndex(_vectors=empty_vectors, _manifest={})
 
-    def fake_embedder(_path: Path, _config: ConfigType) -> np.ndarray:
-        return np.zeros(512, dtype=np.float32)
-
-    def fake_scan_library(_config: Config, _embedder: object) -> LibraryIndex:
+    def fake_load_index(_config: Config) -> LibraryIndex:
         return index
 
-    from taste_pipeline import embed, library  # noqa: PLC0415 -- lazy: under test
+    from taste_pipeline import library  # noqa: PLC0415 -- lazy: under test
 
-    monkeypatch.setattr(embed, "embed_track", fake_embedder)
-    monkeypatch.setattr(library, "scan_library", fake_scan_library)
+    monkeypatch.setattr(library, "load_index", fake_load_index)
 
     result = run_calibration(cfg, lambda _p, _m: None)
 
@@ -332,40 +318,39 @@ def test_run_calibration_returns_defaults_for_empty_library(
     persisted = load_thresholds(cfg.data_dir)
     assert persisted is not None
     assert persisted == result, f"persisted thresholds {persisted!r} do not match returned {result!r}"
+    # And sample_count=0 is recorded so the UI can show "calibrated on 0 songs".
+    raw = json.loads((cfg.data_dir / _THRESHOLDS_FILE_NAME).read_text(encoding="utf-8"))
+    assert raw["sample_count"] == 0, f"empty-library sample_count must be 0, got {raw.get('sample_count')!r}"
 
 
-def test_run_calibration_propagates_embedder_shape_error(
+def test_run_calibration_propagates_load_index_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Calibration re-raises scan_library's ValueError when the embedder shape is wrong.
+    """Calibration re-raises load_index's error instead of swallowing it.
 
     The runner converts any exception into ``status="failed"``; this test
-    proves the calibrate module does NOT swallow ValueError -- the user
-    sees a clear error message instead of a silent zero-track index.
+    proves the calibrate module does NOT swallow errors -- the user sees a
+    clear failure instead of a silent zero-track calibration.
     """
     import pytest  # noqa: PLC0415 -- fixture import
 
     cfg = _make_config(tmp_path)
 
-    def fake_embedder(_path: Path, _config: ConfigType) -> np.ndarray:
-        return np.zeros(512, dtype=np.float32)
-
-    def fake_scan_library(_config: Config, _embedder: object) -> LibraryIndex:
-        message = "embedder returned shape (513,) for /tmp/foo.flac, expected (512,)"
+    def fake_load_index(_config: Config) -> LibraryIndex:
+        message = "index read failed"
         raise ValueError(message)
 
-    from taste_pipeline import embed, library  # noqa: PLC0415 -- lazy: under test
+    from taste_pipeline import library  # noqa: PLC0415 -- lazy: under test
 
-    monkeypatch.setattr(embed, "embed_track", fake_embedder)
-    monkeypatch.setattr(library, "scan_library", fake_scan_library)
+    monkeypatch.setattr(library, "load_index", fake_load_index)
 
-    with pytest.raises(ValueError, match="embedder returned shape"):
+    with pytest.raises(ValueError, match="index read failed"):
         run_calibration(cfg, lambda _p, _m: None)
 
     # And no thresholds.json was written (no partial state)
     assert not (cfg.data_dir / _THRESHOLDS_FILE_NAME).exists(), (
-        "calibration must not persist thresholds when scan_library raised"
+        "calibration must not persist thresholds when load_index raised"
     )
 
 

@@ -47,17 +47,21 @@ Design notes
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from yt_dlp import YoutubeDL
 
+from taste_pipeline.web.jobs import ProgressReporter
+
 if TYPE_CHECKING:
     from taste_pipeline.config import Config
+    from taste_pipeline.library import ScanProgress
     from taste_pipeline.metadata import TrackMetadata
     from taste_pipeline.state import StateStore
 
-RunFn = Callable[[Callable[[float, str], None]], "dict[str, object] | None"]
+RunFn = Callable[[ProgressReporter], "dict[str, object] | None"]
 
 
 def make_feed_factory(config: Config, state: StateStore) -> RunFn:
@@ -145,20 +149,67 @@ def make_download_factory(
     return run_fn
 
 
-def make_index_factory(config: Config) -> RunFn:
+def make_index_factory(config: Config, *, batch_size: int | None = None) -> RunFn:
     """Build an ``index`` factory: run :func:`library.scan_library` with the real :func:`embed.embed_track`.
 
     The embedder is looked up via ``embed.embed_track`` at ``run_fn`` call
     time (not at factory-build time) so a test that monkey-patches
     ``taste_pipeline.embed.embed_track`` before submitting sees its fake
-    vector — the factory does not cache a reference.
+    vector -- the factory does not cache a reference.
+
+    Each :class:`~taste_pipeline.library.ScanProgress` record is turned into
+    a structured ``detail`` payload (current song, queue, counts, elapsed
+    time, ETA) that the Index page renders live over SSE. The final
+    ``report`` leaves that last payload in place so the page can keep
+    showing the final song until the ``done`` event arrives.
+
+    Args:
+        config: Pipeline configuration.
+        batch_size: Optional cap on NEW files embedded this run (``None``
+            = the whole library). Passed through as ``max_new_files``; when
+            the cap is reached the scan stops with a partial index and the
+            final message says it can be resumed.
     """
     from taste_pipeline import embed, library  # noqa: PLC0415 -- lazy: monkey-patch works
 
-    def run_fn(report: Callable[[float, str], None]) -> None:
+    def run_fn(report: ProgressReporter) -> None:
         embedder = embed.embed_track
-        index = library.scan_library(config, embedder)
-        report(1.0, f"indexed {index.count()} files")
+        start = time.monotonic()
+        last_fraction = 0.0
+
+        def on_progress(p: ScanProgress) -> None:
+            nonlocal last_fraction
+            elapsed = time.monotonic() - start
+            last_fraction = p.processed / p.total if p.total else 1.0
+            report(
+                last_fraction,
+                f"indexed {p.processed}/{p.total}: {p.current}",
+                detail={
+                    "current": p.current,
+                    "processed": p.processed,
+                    "total": p.total,
+                    "remaining": p.remaining,
+                    "upcoming": list(p.upcoming),
+                    "elapsed_seconds": round(elapsed, 1),
+                    "eta_seconds": round((elapsed / p.processed) * (p.total - p.processed), 1)
+                    if p.processed > 0
+                    else None,
+                },
+            )
+
+        index = library.scan_library(
+            config,
+            embedder,
+            on_progress=on_progress,
+            should_stop=report.stop_requested,
+            max_new_files=batch_size,
+        )
+        if index.complete:
+            report(1.0, f"indexed {index.count()} files")
+        elif report.stop_requested():
+            report(last_fraction, f"paused after {index.count()} tracks (resume to continue)")
+        else:
+            report(last_fraction, f"batch done: {index.count()} tracks indexed (run again to continue)")
 
     return run_fn
 
@@ -225,7 +276,7 @@ def make_check_url_factory(config: Config, state: StateStore, url: str) -> RunFn
         from taste_pipeline import check, download, metadata  # noqa: PLC0415 -- lazy re-fetch
 
         report(0.0, "parsing URL")
-        with YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+        with YoutubeDL({"quiet": True, "no_warnings": True, "proxy": config.proxy}) as ydl:
             info = ydl.extract_info(url, download=False)
         video_id = str(info.get("id") or "")
         if not video_id:

@@ -158,6 +158,7 @@ class _FakeJob:
         self.finished_at: datetime | None = None
         self.error: str | None = None
         self.result: dict[str, object] | None = None
+        self.detail: dict[str, object] | None = None
         self._run_fn = run_fn
         self._thread: threading.Thread | None = None
         self._cancel_event = threading.Event()
@@ -178,12 +179,14 @@ class _FakeJob:
             self.started_at = datetime.now(UTC)
             self.status = "running"
 
-        def report(progress: float, message: str) -> None:
+        def report(progress: float, message: str, detail: dict[str, object] | None = None) -> None:
             with self._lock:
                 if self._cancel_event.is_set():
                     return
                 self.progress = progress
                 self.log_lines.append(message)
+                if detail is not None:
+                    self.detail = detail
 
         try:
             assert self._run_fn is not None
@@ -246,6 +249,11 @@ class FakeJobRunner:
     def list(self) -> list[_FakeJob]:
         """Return all jobs in newest-first order."""
         return list(reversed(list(self._jobs.values())))
+
+    def is_finalized(self, job_id: uuid.UUID) -> bool:
+        """The fake runner finalizes synchronously, so every job is already finalized."""
+        _ = job_id
+        return True
 
 
 def _build_client_with_fake_runner(

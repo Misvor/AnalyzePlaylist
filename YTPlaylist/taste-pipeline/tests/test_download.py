@@ -11,6 +11,9 @@ import pytest
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+from taste_pipeline import download as download_module
+from taste_pipeline import feed as feed_module
+from taste_pipeline import metadata as metadata_module
 from taste_pipeline.config import Config
 from taste_pipeline.download import DownloadedTrack, download_songs
 from taste_pipeline.metadata import TrackMetadata, metadata_from_json
@@ -206,3 +209,19 @@ def test_download_songs_skips_failed_video_and_continues(
     assert set(_read_downloads(state.db_path)) == {SONG_A_ID, SONG_B_ID}
     inbox = config.data_dir / "inbox"
     assert not [path for path in inbox.iterdir() if DEAD_ID in path.name]
+
+
+def test_ydl_options_thread_the_proxy_into_every_call_site(tmp_path: Path) -> None:
+    # Given a config with a proxy (blocked regions route yt-dlp through one)
+    config = Config(
+        like_library_dir=tmp_path,
+        data_dir=tmp_path / "data",
+        cookie_file=tmp_path / "cookies.txt",
+        download_archive=tmp_path / "data" / "yt-dlp-archive.txt",
+        proxy="http://127.0.0.1:56551",
+    )
+
+    # Then feed, metadata and download all pass the proxy through to yt-dlp
+    assert download_module._ydl_options(config)["proxy"] == "http://127.0.0.1:56551"
+    assert feed_module._ydl_options(config)["proxy"] == "http://127.0.0.1:56551"
+    assert metadata_module._ydl_options(config)["proxy"] == "http://127.0.0.1:56551"

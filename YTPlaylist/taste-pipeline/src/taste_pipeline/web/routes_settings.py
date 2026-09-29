@@ -7,7 +7,7 @@ a process restart before their values take effect:
 - **Live-edit fields** (``keep_threshold``, ``skip_threshold``,
   ``min_dislikes_for_classifier``, ``feed_window_days``,
   ``max_feed_items``, ``max_metadata_fetch``, ``chunk_seconds``,
-  ``min_chunk_seconds``, ``sample_rate``): the POST
+  ``min_chunk_seconds``, ``sample_rate``, ``device``): the POST
   handler writes the new value to ``app.state.config`` AND atomically
   rewrites the on-disk ``config.toml``. The running process picks up
   the new value immediately (e.g. the next calibrated threshold is
@@ -76,6 +76,12 @@ router = APIRouter()
 # Upper bound of the TCP user-port range per RFC 6335 §3.
 _TCP_PORT_MAX: Final[int] = 65535
 
+# Supported compute devices for the index build, mirrored from
+# ``taste_pipeline.config`` (auto resolves to cuda -> mps -> cpu). The
+# template renders one <option> per entry; the POST validator accepts
+# only these.
+_DEVICE_CHOICES: Final[frozenset[str]] = frozenset({"auto", "cpu", "cuda", "mps"})
+
 # Field classification: editable values can be changed at runtime via
 # POST /api/config. The classification is a single source of truth --
 # the template consults it to decide which fields get an <input>, the
@@ -106,6 +112,8 @@ _EDITABLE_FIELDS: Final[frozenset[str]] = frozenset(
         "chunk_seconds",
         "min_chunk_seconds",
         "sample_rate",
+        "device",
+        "proxy",
         "like_library_dir",
         "data_dir",
         "cookie_file",
@@ -403,6 +411,13 @@ def _validate_str_field(name: str, raw: object, *, max_length: int | None = None
     return raw
 
 
+def _validate_optional_str_field(name: str, raw: object) -> str | None:
+    """Coerce ``raw`` to a non-empty string or None; ``""``/``"null"`` mean "unset"."""
+    if raw is None or raw in {"", "null"}:
+        return None
+    return _validate_str_field(name, raw)
+
+
 def _validate_like_library_dir_field(name: str, raw: object) -> str:
     """Coerce ``raw`` to a ``like_library_dir`` path string.
 
@@ -517,6 +532,16 @@ def _validate_float_min0(name: str, raw: object) -> float:
     return _validate_float_field(name, raw, minimum=0.0)
 
 
+def _validate_device_field(name: str, raw: object) -> str:
+    """Coerce ``raw`` to one of :data:`_DEVICE_CHOICES` (the compute device)."""
+    value = _validate_str_field(name, raw)
+    if value not in _DEVICE_CHOICES:
+        allowed = ", ".join(sorted(_DEVICE_CHOICES))
+        message = f"{name}: must be one of {allowed} (got '{value}')"
+        raise _FieldValidationError(message)
+    return value
+
+
 # Per-field dispatch table: Config field name -> validator. New editable fields
 # get a one-line entry here (and a matching entry in ``_EDITABLE_FIELDS``).
 _FIELD_VALIDATORS: Final[dict[str, Callable[[str, object], object]]] = {
@@ -529,6 +554,8 @@ _FIELD_VALIDATORS: Final[dict[str, Callable[[str, object], object]]] = {
     "sample_rate": _validate_int_min1,
     "chunk_seconds": _validate_float_min0,
     "min_chunk_seconds": _validate_float_min0,
+    "device": _validate_device_field,
+    "proxy": _validate_optional_str_field,
     "like_library_dir": _validate_like_library_dir_field,
     "data_dir": _validate_data_dir_field,
     "cookie_file": _validate_file_path_field,

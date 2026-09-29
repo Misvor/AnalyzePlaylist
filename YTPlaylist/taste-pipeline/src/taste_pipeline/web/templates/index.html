@@ -1,0 +1,315 @@
+{% extends "base.html" %}
+
+{% block title %}Index — Taste Pipeline{% endblock %}
+
+{% block content %}
+  <h1>Library Index</h1>
+
+  <div id="index-status-panel" class="index-status">
+    <span class="index-status-label">Library index:</span>
+    <span id="index-status-count" class="index-status-count">Indexed: {{ index_status.count }} tracks</span>
+    <span class="index-status-sep">|</span>
+    <span id="index-status-last-scan" class="index-status-scan">Last scan: {{ index_status.last_scan or "never" }}</span>
+    <span class="index-status-sep">|</span>
+    <span id="index-status-lib" class="index-status-lib">Like-library: {{ index_status.like_library_track_count }} files ({{ index_status.like_library_path }})</span>
+    <span class="index-status-sep">|</span>
+    <span id="index-status-coverage" class="index-status-coverage">Indexed: {{ index_status.count }} / {{ index_status.like_library_track_count }} ({{ [index_status.like_library_track_count - index_status.count, 0]|max }} pending)</span>
+    <span class="index-status-sep">|</span>
+    <span id="index-status-device" class="index-status-device">Device: {{ index_status.device }}</span>
+    <span class="index-status-sep">|</span>
+    <span id="index-status-thresholds" class="index-status-thresholds">
+      {% if index_status.thresholds %}
+        Keep &ge; {{ "%.2f"|format(index_status.thresholds.keep_threshold) }} |
+        Skip &lt; {{ "%.2f"|format(index_status.thresholds.skip_threshold) }}
+      {% else %}
+        Thresholds: (not calibrated)
+      {% endif %}
+    </span>
+  </div>
+
+  <div id="index-controls">
+    <button id="index-build-btn" type="button">Build Index</button>
+    <label for="index-batch-size" class="index-batch-label">Batch</label>
+    <input id="index-batch-size" class="index-batch-size" type="number" min="1" step="1" placeholder="all" />
+    <button id="index-pause-btn" type="button" hidden>Pause</button>
+    <span id="index-status-badge" class="badge" data-status="idle">idle</span>
+    <span id="index-error" class="badge" data-status="failed" hidden></span>
+  </div>
+
+  <section id="index-progress-section">
+    <div id="index-progress" class="progress-bar" data-status="idle">
+      <span id="index-progress-fill" class="fill" style="width: 0%;"></span>
+    </div>
+    <div id="index-current" class="index-current">(no file being processed)</div>
+    <div class="index-meta">
+      <span id="index-counts">0 / 0 (0 remaining)</span>
+      <span class="index-meta-sep">|</span>
+      <span>Elapsed: <span id="index-elapsed">0:00</span></span>
+      <span class="index-meta-sep">|</span>
+      <span>ETA: <span id="index-eta">estimating...</span></span>
+    </div>
+  </section>
+
+  <section id="index-queue">
+    <h2>Queue <span id="index-queue-remaining" class="index-queue-remaining">(0 remaining)</span></h2>
+    <ol id="index-queue-list" class="index-queue-list"></ol>
+  </section>
+
+  <section id="index-log-section">
+    <h2>Log</h2>
+    <div id="index-log" class="check-log"></div>
+  </section>
+
+  <script>
+    // Index page wiring: on load, reattach to the newest index job (the page
+    // survives a reload mid-scan); the Build button creates a new one. Live
+    // progress flows over the same unnamed SSE frames the dashboard uses, so
+    // we branch on the JSON `event` field inside es.onmessage. Every `detail`
+    // access is guarded: a frame without detail, or a job with a null detail,
+    // must never throw.
+    (function () {
+      var TERMINAL = { succeeded: true, failed: true, cancelled: true, paused: true };
+      var MAX_LOG_LINES = 200;
+
+      function $(id) { return document.getElementById(id); }
+
+      // Durations render as `0:ss` under a minute and `Xm Ys` above it.
+      function formatDuration(seconds) {
+        if (seconds === null || seconds === undefined || isNaN(seconds)) return '';
+        var total = Math.max(0, Math.round(Number(seconds)));
+        var minutes = Math.floor(total / 60);
+        var secs = total % 60;
+        if (minutes > 0) return minutes + 'm ' + secs + 's';
+        return '0:' + (secs < 10 ? '0' : '') + secs;
+      }
+
+      function setBadge(status) {
+        var badge = $('index-status-badge');
+        if (!badge) return;
+        badge.textContent = status;
+        badge.dataset.status = status;
+        var bar = $('index-progress');
+        if (bar) bar.dataset.status = status;
+      }
+
+      function showError(message) {
+        var errorEl = $('index-error');
+        if (!errorEl) return;
+        errorEl.textContent = message;
+        errorEl.hidden = false;
+      }
+
+      function appendLog(message) {
+        if (!message) return;
+        var logEl = $('index-log');
+        if (!logEl) return;
+        var line = document.createElement('div');
+        line.textContent = message;
+        logEl.appendChild(line);
+        while (logEl.childElementCount > MAX_LOG_LINES) {
+          logEl.removeChild(logEl.firstChild);
+        }
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function renderDetail(detail) {
+        if (!detail || typeof detail !== 'object') return;
+        var current = $('index-current');
+        if (current && detail.current) current.textContent = detail.current;
+        var counts = $('index-counts');
+        if (counts && typeof detail.processed === 'number' && typeof detail.total === 'number') {
+          var remaining = typeof detail.remaining === 'number' ? detail.remaining : 0;
+          counts.textContent = detail.processed + ' / ' + detail.total + ' (' + remaining + ' remaining)';
+        }
+        var elapsed = $('index-elapsed');
+        if (elapsed) elapsed.textContent = formatDuration(detail.elapsed_seconds) || '0:00';
+        var eta = $('index-eta');
+        if (eta) {
+          eta.textContent = (detail.eta_seconds === null || detail.eta_seconds === undefined)
+            ? 'estimating...'
+            : formatDuration(detail.eta_seconds);
+        }
+        var queueList = $('index-queue-list');
+        if (queueList && Array.isArray(detail.upcoming)) {
+          queueList.innerHTML = '';
+          for (var i = 0; i < detail.upcoming.length; i++) {
+            var item = document.createElement('li');
+            item.textContent = detail.upcoming[i];
+            queueList.appendChild(item);
+          }
+        }
+        var queueRemaining = $('index-queue-remaining');
+        if (queueRemaining && typeof detail.remaining === 'number') {
+          queueRemaining.textContent = '(' + detail.remaining + ' remaining)';
+        }
+      }
+
+      function renderJob(job) {
+        if (!job) return;
+        setBadge(job.status);
+        var fill = $('index-progress-fill');
+        if (fill && typeof job.progress === 'number') {
+          fill.style.width = (job.progress * 100).toFixed(1) + '%';
+        }
+        // Pause is only meaningful while a live index job is on screen; the
+        // Build button doubles as "Resume" once the job is paused.
+        var pauseBtn = $('index-pause-btn');
+        if (pauseBtn) {
+          if (job.kind === 'index' && !TERMINAL[job.status]) {
+            pauseBtn.hidden = false;
+            pauseBtn.dataset.jobId = job.id;
+          } else {
+            pauseBtn.hidden = true;
+          }
+        }
+        var buildBtn = $('index-build-btn');
+        if (buildBtn) buildBtn.textContent = job.status === 'paused' ? 'Resume' : 'Build Index';
+        renderDetail(job.detail);
+        if (Array.isArray(job.log_lines) && job.log_lines.length > 0) {
+          var logEl = $('index-log');
+          if (logEl) logEl.innerHTML = '';
+          for (var i = 0; i < job.log_lines.length; i++) appendLog(job.log_lines[i]);
+        }
+      }
+
+      function attachStream(jobId) {
+        var es = new EventSource('/api/jobs/' + jobId + '/events');
+        es.onmessage = function (evt) {
+          var data;
+          try {
+            data = JSON.parse(evt.data);
+          } catch (e) { /* malformed event payload: ignore */ return; }
+          if (data.event === 'progress') {
+            var fill = $('index-progress-fill');
+            if (fill && typeof data.progress === 'number') {
+              fill.style.width = (data.progress * 100).toFixed(1) + '%';
+            }
+            var badge = $('index-status-badge');
+            if (badge && badge.textContent === 'queued') setBadge('running');
+            // The frame may carry a structured detail object; guard for absence.
+            if (data.detail !== null && data.detail !== undefined) renderDetail(data.detail);
+            appendLog(data.message);
+          } else if (data.event === 'done') {
+            es.close();
+            setBadge(data.status);
+            if (data.error) showError(data.error);
+            refreshStatusPanel();
+          }
+        };
+      }
+
+      function refreshStatusPanel() {
+        fetch('/api/index').then(function (response) { return response.json(); }).then(function (status) {
+          if (!status) return;
+          var count = $('index-status-count');
+          if (count) count.textContent = 'Indexed: ' + status.count + ' tracks';
+          var lastScan = $('index-status-last-scan');
+          if (lastScan) lastScan.textContent = 'Last scan: ' + (status.last_scan || 'never');
+          var lib = $('index-status-lib');
+          if (lib) {
+            lib.textContent = 'Like-library: ' + status.like_library_track_count + ' files (' + status.like_library_path + ')';
+          }
+          var coverage = $('index-status-coverage');
+          if (coverage) {
+            var indexed = typeof status.count === 'number' ? status.count : 0;
+            var total = typeof status.like_library_track_count === 'number' ? status.like_library_track_count : 0;
+            coverage.textContent = 'Indexed: ' + indexed + ' / ' + total + ' (' + Math.max(0, total - indexed) + ' pending)';
+          }
+          var device = $('index-status-device');
+          if (device && status.device) {
+            device.textContent = 'Device: ' + status.device;
+          }
+          var thresholds = $('index-status-thresholds');
+          if (thresholds) {
+            if (status.thresholds) {
+              thresholds.textContent = 'Keep \u2265 ' + status.thresholds.keep_threshold.toFixed(2) +
+                ' | Skip < ' + status.thresholds.skip_threshold.toFixed(2);
+            } else {
+              thresholds.textContent = 'Thresholds: (not calibrated)';
+            }
+          }
+        }).catch(function () { /* status refresh is best-effort */ });
+      }
+
+      function findActiveIndexJob(jobs) {
+        if (!Array.isArray(jobs)) return null;
+        for (var i = 0; i < jobs.length; i++) {
+          if (jobs[i].kind === 'index' && !TERMINAL[jobs[i].status]) return jobs[i];
+        }
+        return null;
+      }
+
+      function loadLatest() {
+        fetch('/api/jobs').then(function (response) { return response.json(); }).then(function (jobs) {
+          if (!Array.isArray(jobs)) return;
+          var latest = null;
+          for (var i = 0; i < jobs.length; i++) {
+            if (jobs[i].kind === 'index') { latest = jobs[i]; break; }
+          }
+          if (!latest) return;
+          renderJob(latest);
+          if (!TERMINAL[latest.status]) attachStream(latest.id);
+        }).catch(function () { /* first load is best-effort */ });
+      }
+
+      var buildBtn = $('index-build-btn');
+      if (buildBtn) {
+        buildBtn.addEventListener('click', function () {
+          var errorEl = $('index-error');
+          if (errorEl) errorEl.hidden = true;
+          // Only include batch_size when the user typed something usable; an
+          // empty field means "index the whole library".
+          var body = { kind: 'index' };
+          var batchInput = $('index-batch-size');
+          if (batchInput && batchInput.value !== '') {
+            var parsed = parseInt(batchInput.value, 10);
+            if (!isNaN(parsed) && parsed >= 1) body.batch_size = parsed;
+          }
+          fetch('/api/jobs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }).then(function (response) {
+            if (response.status === 201) {
+              return response.json().then(function (job) {
+                renderJob(job);
+                attachStream(job.id);
+              });
+            }
+            // 422 = another index job is already running: surface it and
+            // attach to whichever index job is currently non-terminal.
+            showError('another index job is already running');
+            return fetch('/api/jobs').then(function (r) { return r.json(); }).then(function (jobs) {
+              var active = findActiveIndexJob(jobs);
+              if (active) { renderJob(active); attachStream(active.id); }
+            });
+          }).catch(function (err) {
+            showError('failed to start index job: ' + err.message);
+          });
+        });
+      }
+
+      var pauseBtnEl = $('index-pause-btn');
+      if (pauseBtnEl) {
+        pauseBtnEl.addEventListener('click', function () {
+          var jobId = pauseBtnEl.dataset.jobId;
+          if (!jobId) return;
+          pauseBtnEl.disabled = true;
+          fetch('/api/jobs/' + jobId + '/pause', { method: 'POST' }).then(function (response) {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.json();
+          }).then(function (job) {
+            renderJob(job);
+            refreshStatusPanel();
+          }).catch(function (err) {
+            showError('failed to pause index job: ' + err.message);
+          }).finally(function () {
+            pauseBtnEl.disabled = false;
+          });
+        });
+      }
+
+      loadLatest();
+    })();
+  </script>
+{% endblock %}

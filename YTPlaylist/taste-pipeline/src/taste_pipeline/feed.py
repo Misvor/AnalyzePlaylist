@@ -59,6 +59,7 @@ def _ydl_options(config: Config) -> dict[str, object]:
         "extract_flat": "in_playlist",
         "skip_download": True,
         "cookiefile": str(config.cookie_file),
+        "proxy": config.proxy,
         "extractor_args": {"youtubetab": ["approximate_date"]},
         "playlistend": config.max_feed_items,
         "match_filter": match_filter_func(_MATCH_FILTER),

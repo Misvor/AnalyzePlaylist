@@ -13,26 +13,33 @@ The dashboard's contract:
   inherited),
 - contains five run buttons (one per pipeline pass kind + calibrate) wired with
   ``hx-post="/api/jobs"`` + ``hx-vals='{"kind":"<feed|metadata|download|index>"}'``,
-- contains a ``<table id="run-history">`` for htmx to populate from
-  ``GET /api/jobs`` (the actual row population is a client-side htmx swap
-  in the browser, not server-rendered),
+- contains a ``<table id="run-history">`` whose tbody is **server-rendered**
+  from ``JobRunner.list()`` (in-memory jobs plus terminal records hydrated
+  from ``<data_dir>/runs/*.json``) -- history survives navigation and an app
+  restart; clicking a run button swaps in one HTML ``<tr>`` returned by
+  ``POST /api/jobs`` when the request carries ``HX-Request: true``,
 - contains a visible error handler for the "concurrent same-kind job
   rejected" response (htmx:responseError listener + #concurrent-error
   element),
 - contains an inline script that wires ``EventSource('/api/jobs/{id}/events')``
-  to running jobs (via a function re-invoked on htmx:afterSwap),
+  to running jobs (via a function re-invoked on htmx:afterSwap), skips
+  terminal rows, and updates the badge/progress/error/finished cells on
+  ``done``,
 - does NOT auto-start any job on page load.
 """
 
 from __future__ import annotations
 
+import json
 import re
+import uuid
 from typing import TYPE_CHECKING
 
 from fastapi.testclient import TestClient
 
 from taste_pipeline.config import Config, load_config
 from taste_pipeline.web import create_app
+from taste_pipeline.web.routes_jobs import JOB_FACTORIES
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -65,6 +72,37 @@ def _make_config(tmp_path: Path) -> Config:
 def _client(tmp_path: Path) -> TestClient:
     """Build a TestClient over a real Config-derived app."""
     return TestClient(create_app(_make_config(tmp_path)))
+
+
+def _seed_run_record(
+    tmp_path: Path,
+    *,
+    job_id: uuid.UUID | None = None,
+    kind: str = "index",
+    status: str = "succeeded",
+    error: str | None = None,
+) -> uuid.UUID:
+    """Write one persisted run record under ``data_dir/runs`` and return its id.
+
+    The record has the exact shape ``JobRunner._persist`` writes, so
+    ``JobRunner.__init__`` hydration picks it up when the app is built.
+    """
+    runs_dir = tmp_path / "data" / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    resolved_id = job_id or uuid.uuid4()
+    record = {
+        "id": str(resolved_id),
+        "kind": kind,
+        "status": status,
+        "progress": 1.0,
+        "log_lines": ["done"],
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "finished_at": "2026-01-01T00:00:01+00:00",
+        "error": error,
+        "result": None,
+    }
+    (runs_dir / f"{resolved_id}.json").write_text(json.dumps(record), encoding="utf-8")
+    return resolved_id
 
 
 def _extract_hx_vals(html: str, button_id: str) -> str | None:
@@ -288,3 +326,106 @@ def test_dashboard_event_source_setup_for_running_jobs(tmp_path: Path) -> None:
         "dashboard does not subscribe to htmx:afterSwap; new rows in the "
         "history table will not be wired to live progress"
     )
+
+
+def test_get_root_renders_persisted_terminal_run_history(tmp_path: Path) -> None:
+    # Given a persisted terminal run record seeded before the app is built,
+    # so JobRunner hydration loads it into the runner's job list
+    job_id = _seed_run_record(tmp_path, kind="index", status="succeeded")
+
+    # When requesting the dashboard page
+    client = _client(tmp_path)
+    response = client.get("/")
+
+    # Then the history table renders a real <tr> for the hydrated job with
+    # both a progress bar and a badge -- proving server-rendered history.
+    assert response.status_code == 200
+    body = response.text
+    row_match = re.search(
+        r'<tr data-job-id="' + re.escape(str(job_id)) + r'"[^>]*>.*?</tr>', body, flags=re.DOTALL
+    )
+    assert row_match is not None, f"no rendered <tr data-job-id={job_id}> in dashboard:\n{body}"
+    row = row_match.group(0)
+    assert "progress-bar" in row, f"hydrated row has no .progress-bar: {row!r}"
+    assert 'class="badge"' in row, f"hydrated row has no .badge: {row!r}"
+
+
+def test_terminal_run_row_carries_terminal_status(tmp_path: Path) -> None:
+    # Given a persisted failed run record
+    job_id = _seed_run_record(tmp_path, kind="metadata", status="failed", error="boom")
+
+    # When requesting the dashboard page
+    client = _client(tmp_path)
+    response = client.get("/")
+
+    # Then the rendered row's data-status is terminal so the browser-side
+    # streamer will skip it (never opening an SSE connection for a dead job).
+    assert response.status_code == 200
+    body = response.text
+    row_match = re.search(r'<tr data-job-id="' + re.escape(str(job_id)) + r'"[^>]*>', body)
+    assert row_match is not None, f"no rendered <tr data-job-id={job_id}> in dashboard"
+    assert 'data-status="failed"' in row_match.group(0), (
+        f"terminal row missing data-status=failed: {row_match.group(0)!r}"
+    )
+
+
+def test_post_jobs_with_hx_request_returns_html_row(tmp_path: Path) -> None:
+    # Given a registered "index" factory and an app with a real JobRunner
+    client = _client(tmp_path)
+
+    def fake_index(report: object) -> None:
+        report(1.0, "done")  # type: ignore[misc]  # test fake mirrors the run_fn contract
+
+    JOB_FACTORIES["index"] = fake_index  # type: ignore[assignment]  # test fake
+    try:
+        # When POSTing with the htmx request header
+        response = client.post("/api/jobs", json={"kind": "index"}, headers={"HX-Request": "true"})
+    finally:
+        JOB_FACTORIES.pop("index", None)
+
+    # Then the response is 201 HTML containing a real <tr> row for the job
+    assert response.status_code == 201, f"expected 201, got {response.status_code}: {response.text}"
+    assert response.headers["content-type"].startswith("text/html"), (
+        f"expected text/html, got {response.headers['content-type']!r}"
+    )
+    body = response.text
+    assert "<tr" in body, f"htmx response is not a table row: {body!r}"
+    assert "data-job-id" in body, f"htmx row missing data-job-id: {body!r}"
+    assert "progress-bar" in body, f"htmx row missing progress-bar: {body!r}"
+    assert "index" in body, f"htmx row missing kind: {body!r}"
+
+
+def test_dashboard_done_handler_updates_badge_and_status(tmp_path: Path) -> None:
+    # Given an app built from a valid config
+    client = _client(tmp_path)
+
+    # When requesting the dashboard page
+    response = client.get("/")
+
+    # Then the inline script's `done` branch must update the badge's
+    # textContent and dataset.status (and the row's data-status) so the row
+    # reflects the terminal state without a reload.
+    assert response.status_code == 200
+    body = response.text
+    done_idx = body.find("data.event === 'done'")
+    assert done_idx != -1, "dashboard onmessage handler has no `done` branch"
+    done_block = body[done_idx : done_idx + 1200]
+    assert "textContent" in done_block, f"done handler does not set badge textContent:\n{done_block}"
+    assert "dataset.status" in done_block, f"done handler does not set dataset.status:\n{done_block}"
+
+
+def test_dashboard_sse_uses_onmessage_and_dispatches_on_json_event(tmp_path: Path) -> None:
+    # Given an app built from a valid config
+    client = _client(tmp_path)
+
+    # When requesting the dashboard page
+    response = client.get("/")
+
+    # Then the SSE wiring uses EventSource.onmessage (the server sends unnamed
+    # `data: {"event": ...}` frames, so named addEventListener('progress'/'done')
+    # listeners would never fire) and branches on the JSON `event` field.
+    assert response.status_code == 200
+    body = response.text
+    assert "onmessage" in body, "dashboard does not assign es.onmessage; unnamed SSE frames never dispatch"
+    assert "data.event === 'progress'" in body, "dashboard onmessage does not handle the progress event"
+    assert "data.event === 'done'" in body, "dashboard onmessage does not handle the done event"

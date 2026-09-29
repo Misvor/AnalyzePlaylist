@@ -43,6 +43,7 @@ def _ydl_options(config: Config) -> dict[str, object]:
     return {
         "format": "bestaudio/best",
         "cookiefile": str(config.cookie_file),
+        "proxy": config.proxy,
         "outtmpl": str(config.data_dir / "inbox" / _OUTTMPL_NAME),
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "flac"}],
         "download_archive": str(config.download_archive),

@@ -23,7 +23,7 @@ from yt_dlp.utils import DownloadError
 from taste_pipeline.config import Config, load_config
 from taste_pipeline.download import DownloadedTrack
 from taste_pipeline.feed import CookieExpiredError, FeedItem
-from taste_pipeline.library import LibraryIndex
+from taste_pipeline.library import LibraryIndex, ScanProgress
 from taste_pipeline.metadata import TrackMetadata
 from taste_pipeline.state import StateStore
 from taste_pipeline.web import job_factories
@@ -292,9 +292,19 @@ async def test_index_factory_calls_scan_library_with_embedder(
 
     captured: dict[str, object] = {}
 
-    def fake_scan_library(cfg: Config, embedder: Callable[[object, object], np.ndarray]) -> LibraryIndex:
+    def fake_scan_library(
+        cfg: Config,
+        embedder: Callable[[object, object], np.ndarray],
+        *,
+        on_progress: Callable[[ScanProgress], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        max_new_files: int | None = None,
+    ) -> LibraryIndex:
         captured["config"] = cfg
         captured["embedder"] = embedder
+        captured["on_progress"] = on_progress
+        captured["should_stop"] = should_stop
+        captured["max_new_files"] = max_new_files
         return fake_index
 
     monkeypatch.setattr("taste_pipeline.embed.embed_track", fake_embed_track)
@@ -312,10 +322,76 @@ async def test_index_factory_calls_scan_library_with_embedder(
     assert final.progress == 1.0
     assert captured["config"] is config
     assert captured["embedder"] is fake_embed_track
+    # And the pause/batch wiring is forwarded to scan_library
+    assert callable(captured["should_stop"]), "index factory must forward report.stop_requested"
+    assert captured["max_new_files"] is None, "no batch_size means the whole library"
     # And the run record mentions the indexed count
     assert any("3" in line for line in final.log_lines), (
         f"expected indexed count '3' in log lines, got {final.log_lines!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_index_factory_forwards_structured_progress_in_detail_and_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a fake scan_library that drives the on_progress callback with ScanProgress records
+    config = _make_config(tmp_path)
+    fake_embed_track = MagicMock(return_value=np.zeros(512, dtype=np.float32))
+    fake_index = _make_fake_library_index(n=3)
+    files = ["a.flac", "b.flac", "c.flac"]
+
+    def fake_scan_library(
+        cfg: Config,
+        embedder: Callable[[object, object], np.ndarray],
+        *,
+        on_progress: Callable[[ScanProgress], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        max_new_files: int | None = None,
+    ) -> LibraryIndex:
+        assert on_progress is not None, "index factory must pass an on_progress callback"
+        total = len(files)
+        for k, name in enumerate(files, start=1):
+            processed = k - 1
+            on_progress(
+                ScanProgress(
+                    processed=processed,
+                    total=total,
+                    current=name,
+                    remaining=total - processed,
+                    upcoming=tuple(files[k:]),
+                )
+            )
+        return fake_index
+
+    monkeypatch.setattr("taste_pipeline.embed.embed_track", fake_embed_track)
+    monkeypatch.setattr("taste_pipeline.library.scan_library", fake_scan_library)
+    factory = job_factories.make_index_factory(config)
+    runner = JobRunner(tmp_path / "data")
+
+    # When submitting
+    job = await runner.submit("index", factory)
+    final = await _wait_for_terminal(runner, job.id)
+
+    # Then the job's log_lines contain every intermediate indexed k/n: <file>
+    # line, not just the final file count
+    assert final.status == "succeeded"
+    log_blob = "\n".join(final.log_lines)
+    assert "indexed 0/3: a.flac" in log_blob, f"expected 'indexed 0/3: a.flac' in {final.log_lines!r}"
+    assert "indexed 1/3: b.flac" in log_blob, f"expected 'indexed 1/3: b.flac' in {final.log_lines!r}"
+    assert "indexed 2/3: c.flac" in log_blob, f"expected 'indexed 2/3: c.flac' in {final.log_lines!r}"
+
+    # And the final detail (left in place after the closing report) describes
+    # the structured progress payload the Index page consumes.
+    detail = final.detail
+    assert detail is not None, "index factory must attach a structured detail payload"
+    assert detail["current"] == "c.flac"
+    assert detail["processed"] == 2
+    assert detail["total"] == 3
+    assert detail["remaining"] == 1
+    assert detail["upcoming"] == []
+    assert isinstance(detail["elapsed_seconds"], float)
+    assert detail["eta_seconds"] is not None, "eta_seconds is computed once processed > 0"
 
 
 @pytest.mark.asyncio

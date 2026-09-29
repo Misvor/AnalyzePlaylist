@@ -14,12 +14,13 @@ Public surface:
 - :func:`check_track_against_library` -- pure numpy function; takes a
   query vector + library matrix + ids + thresholds; returns a
   :class:`CheckResult`. Does not touch disk.
-- :func:`check_audio_file` -- thin I/O wrapper: embeds the audio file,
-  scans the like-library, loads thresholds from
-  ``<data_dir>/thresholds.json``, then calls the pure function. Mirrors
+- :func:`check_audio_file` -- thin I/O wrapper: embeds the query audio
+  file, loads the persisted index and thresholds from
+  ``<data_dir>``, then calls the pure function. Mirrors
   :mod:`taste_pipeline.calibrate`'s lazy-import pattern so tests can
-  monkey-patch ``embed.embed_track`` and ``library.scan_library``
-  without caching references at module load time.
+  monkey-patch ``embed.embed_track`` and ``library.load_index``
+  without caching references at module load time. It never builds the
+  index as a side effect -- an un-indexed library returns ``no_library``.
 
 The "no calibration" case is handled explicitly: ``thresholds is None``
 yields ``verdict="uncertain"`` with the top-K matches still populated so
@@ -212,18 +213,23 @@ def check_track_against_library(
 
 
 def check_audio_file(audio_path: Path, config: Config) -> CheckResult:
-    """Embed ``audio_path``, scan the like-library, compare, return a :class:`CheckResult`.
+    """Embed ``audio_path``, load the persisted index, compare, return a :class:`CheckResult`.
 
-    This is the I/O wrapper: it embeds one audio file (single-track path,
-    no scan), refreshes the library index (incremental scan; cached
-    vectors are reused when file mtime/size are unchanged), loads the
-    persisted calibration thresholds (or ``None``), then delegates to
+    This is the I/O wrapper: it embeds the single query track (the library
+    is never re-embedded), loads the persisted library index via
+    :func:`taste_pipeline.library.load_index`, loads the persisted
+    calibration thresholds (or ``None``), then delegates to
     :func:`check_track_against_library`.
+
+    The library ids are taken in row (``vector_id``) order via
+    :meth:`taste_pipeline.library.LibraryIndex.ids` -- the manifest is not
+    re-sorted, because incremental appends need not be globally sorted and
+    row order is what aligns the ids with the vector matrix.
 
     The pipeline modules are imported lazily inside this function so
     tests can ``monkeypatch.setattr`` the source module attributes
     (``taste_pipeline.embed.embed_track``,
-    ``taste_pipeline.library.scan_library``,
+    ``taste_pipeline.library.load_index``,
     ``taste_pipeline.calibrate.load_thresholds``) and observe the patched
     call sites. The lazy-import pattern mirrors
     :func:`taste_pipeline.calibrate.run_calibration` so the existing test
@@ -233,14 +239,15 @@ def check_audio_file(audio_path: Path, config: Config) -> CheckResult:
     Args:
         audio_path: Audio file to check (any format the CLAP embedder
             understands via ffmpeg).
-        config: Pipeline configuration (``like_library_dir`` is scanned;
-            ``data_dir`` carries the persisted thresholds).
+        config: Pipeline configuration (``data_dir`` carries the persisted
+            index and thresholds).
 
     Returns:
         A :class:`CheckResult`. Never raises -- embedding failures are
         surfaced via the embedder's exception types, which propagate to
-        the caller (the route handler converts them to a 500). Library
-        empty-ness surfaces as ``verdict="no_library"``.
+        the caller (the route handler converts them to a 500). An empty or
+        missing index surfaces as ``verdict="no_library"`` (run the index
+        job first; this wrapper does NOT build it as a side effect).
     """
     # Lazy imports mirror the calibrate.py pattern: tests monkey-patch the
     # source modules before calling this function and rely on attribute
@@ -249,7 +256,6 @@ def check_audio_file(audio_path: Path, config: Config) -> CheckResult:
     from taste_pipeline import calibrate, embed, library  # noqa: PLC0415 -- lazy: monkey-patch works
 
     embedding = embed.embed_track(audio_path, config)
-    index = library.scan_library(config, embed.embed_track)
-    ids = sorted(index.manifest().keys())
+    index = library.load_index(config)
     thresholds = calibrate.load_thresholds(config.data_dir)
-    return check_track_against_library(embedding, index.vectors(), ids, thresholds)
+    return check_track_against_library(embedding, index.vectors(), index.ids(), thresholds)

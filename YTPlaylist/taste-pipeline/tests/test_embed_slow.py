@@ -23,7 +23,6 @@ pytestmark = [
 
 SAMPLE_RATE: int = 48000
 EMBEDDING_DIM: int = 512
-MODEL_LOCAL_DIR: Path = Path("./models/clap")
 
 
 def _write_sine_wav(path: Path, *, frequency: float, seconds: float) -> None:
@@ -39,11 +38,11 @@ def _write_sine_wav(path: Path, *, frequency: float, seconds: float) -> None:
 
 @pytest.fixture(scope="module")
 def clap_model() -> object:
-    """Load the real CLAP model once per module; skip cleanly when the local weights are missing."""
+    """Load the real CLAP model once per module; skip cleanly when the bundled weights are missing."""
     try:
-        return get_model(MODEL_LOCAL_DIR)
+        return get_model()
     except Exception as exc:  # noqa: BLE001  # any load failure (missing weights, file error) means "model unavailable"
-        pytest.skip(f"CLAP weights unavailable at {MODEL_LOCAL_DIR}: {exc}")
+        pytest.skip(f"bundled CLAP weights unavailable: {exc}")
 
 
 @pytest.fixture

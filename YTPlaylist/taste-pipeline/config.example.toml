@@ -13,6 +13,12 @@ min_dislikes_for_classifier = 30
 # Target sample rate for ffmpeg decode (CLAP expects 48 kHz).
 sample_rate = 48000
 
+# Optional proxy for yt-dlp (feed / metadata / download / Check URL). Set this
+# when YouTube is blocked and a local VPN/proxy client exposes a proxy port.
+# Omit for direct access.
+# proxy = "http://127.0.0.1:56551"
+# proxy = "socks5://127.0.0.1:1080"
+
 # Scoring thresholds. When `null`, calibrated values are loaded from
 # <data_dir>/index/thresholds.json (produced by `calibrate`). Otherwise
 # these overrides win. Both must lie in [0.0, 1.0] and satisfy

@@ -81,11 +81,21 @@
           <tr><th>Field</th><th>Value</th></tr>
         </thead>
         <tbody>
-          {% for row in rows if row.editable and row.name in ("feed_window_days","max_feed_items","max_metadata_fetch","chunk_seconds","min_chunk_seconds","sample_rate","model_name") %}
+          {% for row in rows if row.editable and row.name in ("feed_window_days","max_feed_items","max_metadata_fetch","chunk_seconds","min_chunk_seconds","sample_rate","device","proxy") %}
             <tr class="settings-row settings-editable" data-field="{{ row.name }}" data-kind="{{ row.kind }}">
               <td class="field-name"><label for="field-{{ row.name }}">{{ row.name }}</label></td>
               <td class="field-input">
-                {% if row.kind == "bool" %}
+                {% if row.name == "device" %}
+                  <select id="field-{{ row.name }}" name="{{ row.name }}">
+                    <option value="auto"{% if row.value == "auto" %} selected{% endif %}>auto</option>
+                    <option value="cuda"{% if row.value == "cuda" %} selected{% endif %}>cuda</option>
+                    <option value="mps"{% if row.value == "mps" %} selected{% endif %}>mps</option>
+                    <option value="cpu"{% if row.value == "cpu" %} selected{% endif %}>cpu</option>
+                  </select>
+                {% elif row.name == "proxy" %}
+                  <input id="field-{{ row.name }}" name="{{ row.name }}" type="text" autocomplete="off"
+                         placeholder="http://127.0.0.1:56551" value="{{ '' if row.kind == 'none' else row.value }}" />
+                {% elif row.kind == "bool" %}
                   <select id="field-{{ row.name }}" name="{{ row.name }}">
                     <option value="true" {% if row.value %}selected{% endif %}>true</option>
                     <option value="false" {% if not row.value %}selected{% endif %}>false</option>

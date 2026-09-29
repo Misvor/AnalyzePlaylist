@@ -28,14 +28,16 @@ _DATA_SUBDIRS: Final[tuple[str, ...]] = (
 _DOWNLOAD_ARCHIVE_NAME: Final[str] = "yt-dlp-archive.txt"
 _WITH_MIN_BOUND: Final[int] = 1
 _WITH_MAX_BOUND: Final[int] = 2
+_DEVICE_CHOICES: Final[str] = "auto, cpu, cuda, mps"
+_ALLOWED_DEVICES: Final[frozenset[str]] = frozenset(_DEVICE_CHOICES.split(", "))
 
-# Per-field validation specs: (kind, *bounds). kind ∈ path_req, path_opt, str, int, float, opt_float.
+# Per-field validation specs: (kind, *bounds). kind ∈ path_req, path_opt, str, opt_str, int, float, opt_float.
 _FIELD_SPECS: Final[dict[str, tuple]] = {
     "like_library_dir": ("path_req",),
     "data_dir": ("path_req",),
     "cookie_file": ("path_req",),
     "download_archive": ("path_opt",),
-    "model_local_dir": ("path_opt",),
+    "proxy": ("opt_str",),
     "feed_window_days": ("int", 1),
     "max_feed_items": ("int", 1),
     "max_metadata_fetch": ("int", 1),
@@ -45,6 +47,7 @@ _FIELD_SPECS: Final[dict[str, tuple]] = {
     "keep_threshold": ("opt_float", 0.0, 1.0),
     "skip_threshold": ("opt_float", 0.0, 1.0),
     "min_dislikes_for_classifier": ("int", 0),
+    "device": ("str",),
     "web_host": ("str",),
     "web_port": ("int", 1, 65535),
 }
@@ -66,7 +69,7 @@ class Config:
     data_dir: Path
     cookie_file: Path
     download_archive: Path
-    model_local_dir: Path = Path("./models/clap")
+    proxy: str | None = None
     feed_window_days: int = 7
     max_feed_items: int = 500
     max_metadata_fetch: int = 150
@@ -76,6 +79,7 @@ class Config:
     keep_threshold: float | None = None
     skip_threshold: float | None = None
     min_dislikes_for_classifier: int = 30
+    device: str = "auto"
     web_host: str = "127.0.0.1"
     web_port: int = 8741
 
@@ -167,7 +171,9 @@ def _coerce_optional_float(
 def _coerce_field(name: str, value: object, spec: tuple, base_dir: Path, errors: list[str]) -> object | None:
     """Dispatch one field by its spec. Returns the coerced value or ``None`` (error appended)."""
     kind = spec[0]
-    if kind == "str":
+    if kind in {"str", "opt_str"}:
+        if kind == "opt_str" and value is None:
+            return None
         return _coerce_str(name, value, errors)
     if kind == "path_req":
         return _coerce_path(name, value, base_dir, errors)
@@ -224,6 +230,9 @@ def _validate(raw: dict[str, object], config_path: Path) -> Config:
     keep, skip = values.get("keep_threshold"), values.get("skip_threshold")
     if isinstance(keep, float) and isinstance(skip, float) and skip >= keep:
         errors.append(f"skip_threshold ({skip}) must be strictly less than keep_threshold ({keep})")
+    device = values.get("device")
+    if isinstance(device, str) and device not in _ALLOWED_DEVICES:
+        errors.append(f"device: must be one of {_DEVICE_CHOICES} (got '{device}')")
     if errors:
         bullets = "\n  - ".join(errors)
         message = f"invalid config {config_path}:\n  - {bullets}"
@@ -241,7 +250,9 @@ def _validate(raw: dict[str, object], config_path: Path) -> Config:
     for sub in _DATA_SUBDIRS:
         (data_dir / sub).mkdir(parents=True, exist_ok=True)
 
-    return Config(**values)
+    # Every field was coerced + validated above, so the dynamic kwargs match
+    # the dataclass signature; the type checker cannot see through **values.
+    return Config(**values)  # pyright: ignore[reportArgumentType]
 
 
 def load_config(

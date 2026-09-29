@@ -185,15 +185,16 @@ def test_get_api_index_like_library_track_count_counts_audio_files(tmp_path: Pat
     assert response.json()["like_library_track_count"] == 6
 
 
-def test_get_api_index_response_shape_has_all_five_fields(tmp_path: Path) -> None:
-    """The response payload always has exactly the canonical 5 keys."""
+def test_get_api_index_response_shape_has_all_six_fields(tmp_path: Path) -> None:
+    """The response payload always has exactly the canonical 6 keys."""
     # Given a fresh config (no index, empty lib)
     client = _make_client(tmp_path)
 
     # When requesting the index status endpoint
     response = client.get("/api/index")
 
-    # Then the response shape is the canonical 5-key dict
+    # Then the response shape is the canonical 6-key dict, including the
+    # compute device the index build will use (default "auto").
     assert response.status_code == 200
     payload = response.json()
     assert set(payload.keys()) == {
@@ -202,7 +203,11 @@ def test_get_api_index_response_shape_has_all_five_fields(tmp_path: Path) -> Non
         "like_library_path",
         "like_library_track_count",
         "thresholds",
+        "device",
     }
+    assert payload["device"] == "auto", (
+        f"device must default to 'auto' when the config does not set it; got {payload['device']!r}"
+    )
 
 
 def test_get_api_index_count_does_not_require_vectors_file(tmp_path: Path) -> None:

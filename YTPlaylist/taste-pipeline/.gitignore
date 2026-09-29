@@ -18,7 +18,7 @@ var/
 data/
 runs/
 
-# Local CLAP weights (~1.8 GB) — populated once by the user, never committed.
+# Bundled CLAP weights (~776 MB) under src/taste_pipeline/models/ - shipped locally, never committed.
 models/
 
 # Placeholders shipped with config.example.toml (smoke-test fixtures,

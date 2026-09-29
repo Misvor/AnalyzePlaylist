@@ -15,7 +15,7 @@ Response shape (locked by ``tests/test_api_index.py``):
   the manifest exists, else ``None``.
 - ``like_library_path``: ``str(config.like_library_dir)``.
 - ``like_library_track_count``: recursive count of audio files
-  (``.flac``/``.mp3``/``.opus``/``.m4a``/``.ogg``, case-insensitive)
+  (``.flac``/``.mp3``/``.opus``/``.m4a``/``.ogg``/``.wav``, case-insensitive)
   under ``config.like_library_dir``.
 - ``thresholds``: ``{"keep_threshold": float, "skip_threshold": float}``
   when ``<data_dir>/thresholds.json`` exists and parses; ``None`` when
@@ -23,6 +23,10 @@ Response shape (locked by ``tests/test_api_index.py``):
   "(not calibrated)"). The value comes from
   :func:`taste_pipeline.calibrate.load_thresholds`, which treats a
   malformed thresholds.json as missing.
+- ``device``: ``config.device`` (one of ``"auto"``, ``"cuda"``, ``"mps"``,
+  ``"cpu"``). The Index page surfaces this so the user can see which
+  compute device the next Build Index run will target; ``"auto"``
+  resolves to cuda -> mps -> cpu at embed time.
 
 This module intentionally has no dependency on ``taste_pipeline.embed``
 or ``taste_pipeline.library.scan_library`` -- loading the CLAP model on
@@ -51,7 +55,7 @@ router = APIRouter(prefix="/api")
 # changes, the library integration tests will catch drift.
 _INDEX_SUBDIR: Final[str] = "index"
 _MANIFEST_NAME: Final[str] = "library_manifest.json"
-_AUDIO_EXTENSIONS: Final[frozenset[str]] = frozenset({".flac", ".mp3", ".opus", ".m4a", ".ogg"})
+_AUDIO_EXTENSIONS: Final[frozenset[str]] = frozenset({".flac", ".mp3", ".opus", ".m4a", ".ogg", ".wav"})
 
 
 def _config_from_request(request: Request) -> Config:
@@ -87,6 +91,7 @@ def build_index_status(config: Config) -> dict[str, object]:
         "like_library_path": str(config.like_library_dir),
         "like_library_track_count": _count_audio_files(config.like_library_dir),
         "thresholds": load_thresholds(config.data_dir),
+        "device": config.device,
     }
 
 
@@ -143,6 +148,10 @@ async def get_index_status(request: Request) -> dict[str, object]:
     - ``like_library_path`` -- ``str(config.like_library_dir)``.
     - ``like_library_track_count`` -- recursive count of audio files in
       ``config.like_library_dir`` (``_AUDIO_EXTENSIONS``, case-insensitive).
+    - ``thresholds`` -- ``{"keep_threshold", "skip_threshold"}`` when
+      ``<data_dir>/thresholds.json`` exists; ``None`` otherwise.
+    - ``device`` -- ``config.device`` (the compute device the next
+      index build will use).
     """
     cfg = _config_from_request(request)
     return build_index_status(cfg)

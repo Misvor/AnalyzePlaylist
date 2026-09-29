@@ -60,6 +60,7 @@ def _ydl_options(config: Config) -> dict[str, object]:
     return {
         "skip_download": True,
         "cookiefile": str(config.cookie_file),
+        "proxy": config.proxy,
         "quiet": True,
         "no_warnings": True,
     }

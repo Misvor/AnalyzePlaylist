@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 import uuid
 from typing import TYPE_CHECKING
 
 import pytest
 
-from taste_pipeline.web.jobs import Job, JobConflictError, JobRunner
+from taste_pipeline.web.jobs import Job, JobConflictError, JobRunner, ProgressReporter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -36,7 +37,7 @@ async def _wait_for_terminal(
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         job = runner.get(job_id)
-        if job.status in ("succeeded", "failed", "cancelled"):
+        if job.status in ("succeeded", "failed", "cancelled", "paused"):
             return job
         await asyncio.sleep(0.005)
     msg = f"job {job_id} did not reach terminal state within {timeout_s}s"
@@ -168,6 +169,48 @@ async def test_run_record_persists_as_json_under_data_dir_runs(tmp_path: Path) -
     assert payload["finished_at"] is not None
 
 
+def test_job_detail_defaults_to_none() -> None:
+    # Given a freshly constructed Job
+    job = Job(id=uuid.uuid4(), kind="index")
+
+    # Then its structured detail payload is unset
+    assert job.detail is None
+
+
+@pytest.mark.asyncio
+async def test_report_detail_is_persisted_and_hydrated(tmp_path: Path) -> None:
+    # Given a runner whose run_fn reports a structured detail payload
+    runner = JobRunner(tmp_path)
+    detail: dict[str, object] = {
+        "current": "a.flac",
+        "processed": 0,
+        "total": 3,
+        "remaining": 3,
+        "upcoming": ["b.flac", "c.flac"],
+        "elapsed_seconds": 0.1,
+        "eta_seconds": None,
+    }
+
+    def run_fn(report: ProgressReporter) -> None:
+        report(0.0, "indexed 0/3: a.flac", detail=detail)
+
+    # When the job runs to completion
+    job = await runner.submit("index", run_fn)
+    await _wait_for_terminal(runner, job.id)
+
+    # Then a later report without detail leaves the last payload in place
+    assert runner.get(job.id).detail == detail
+    # And the persisted run record round-trips the detail object
+    payload = json.loads((tmp_path / "runs" / f"{job.id}.json").read_text(encoding="utf-8"))
+    assert payload["detail"] == detail
+
+    # When a fresh runner hydrates that record from disk
+    hydrated = JobRunner(tmp_path).get(job.id)
+
+    # Then the detail payload is restored
+    assert hydrated.detail == detail
+
+
 @pytest.mark.asyncio
 async def test_cancel_sets_status_to_cancelled(tmp_path: Path) -> None:
     # Given a runner with a slow running job (sleeps ~1s so we can cancel mid-flight)
@@ -264,3 +307,224 @@ async def test_each_job_has_its_own_report_callable(tmp_path: Path) -> None:
     assert all(line.startswith("from-b") for line in final_b.log_lines)
     assert not any(line.startswith("from-b") for line in final_a.log_lines)
     assert not any(line.startswith("from-a") for line in final_b.log_lines)
+
+
+def _write_run_record(runs_dir: Path, payload: dict[str, object], file_name: str = "") -> uuid.UUID:
+    """Write one run-record JSON under ``runs_dir`` and return the job id it encodes."""
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    job_id = uuid.UUID(str(payload["id"]))
+    (runs_dir / (file_name or f"{job_id}.json")).write_text(json.dumps(payload), encoding="utf-8")
+    return job_id
+
+
+def _terminal_record(job_id: uuid.UUID, status: str = "succeeded") -> dict[str, object]:
+    """A well-formed persisted terminal run record matching ``JobRunner._persist``."""
+    return {
+        "id": str(job_id),
+        "kind": "index",
+        "status": status,
+        "progress": 1.0,
+        "log_lines": ["indexed 3/3", "indexed 3 files"],
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "finished_at": "2026-01-01T00:00:01+00:00",
+        "error": None,
+        "result": None,
+        "detail": None,
+    }
+
+
+def test_runner_hydrates_persisted_terminal_run_record(tmp_path: Path) -> None:
+    # Given a data_dir with one persisted terminal run record
+    job_id = uuid.uuid4()
+    _ = _write_run_record(tmp_path / "runs", _terminal_record(job_id, "succeeded"))
+
+    # When constructing a JobRunner over that data_dir
+    runner = JobRunner(tmp_path)
+
+    # Then the hydrated job is returned by list() with its full state
+    listed = runner.list()
+    assert len(listed) == 1, f"expected 1 hydrated job, got {listed!r}"
+    assert listed[0].id == job_id
+    assert listed[0].kind == "index"
+    assert listed[0].status == "succeeded"
+    assert listed[0].progress == 1.0
+    assert listed[0].log_lines == ["indexed 3/3", "indexed 3 files"]
+    assert listed[0].detail is None
+    assert listed[0].started_at is not None
+    assert listed[0].finished_at is not None
+
+
+def test_runner_hydrates_detail_from_run_record(tmp_path: Path) -> None:
+    # Given a persisted terminal record carrying a structured detail payload
+    job_id = uuid.uuid4()
+    record = _terminal_record(job_id)
+    record["detail"] = {"current": "last.flac", "processed": 2, "total": 3}
+    _ = _write_run_record(tmp_path / "runs", record)
+
+    # When constructing a JobRunner over that data_dir
+    runner = JobRunner(tmp_path)
+
+    # Then the hydrated job exposes the detail payload
+    assert runner.list()[0].detail == {"current": "last.flac", "processed": 2, "total": 3}
+
+
+def test_runner_skips_malformed_run_records_without_raising(tmp_path: Path) -> None:
+    # Given a runs dir with malformed JSON and a record missing required fields
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    (runs_dir / "broken.json").write_text("{not valid json", encoding="utf-8")
+    (runs_dir / "missing.json").write_text(json.dumps({"kind": "feed"}), encoding="utf-8")
+
+    # When constructing a JobRunner
+    runner = JobRunner(tmp_path)
+
+    # Then the bad records are ignored and construction did not raise
+    assert runner.list() == []
+
+
+def test_runner_ignores_non_terminal_run_records(tmp_path: Path) -> None:
+    # Given a persisted record whose status is not terminal
+    job_id = uuid.uuid4()
+    payload = _terminal_record(job_id)
+    payload["status"] = "running"
+    _ = _write_run_record(tmp_path / "runs", payload)
+
+    # When constructing a JobRunner
+    runner = JobRunner(tmp_path)
+
+    # Then the non-terminal record is not hydrated (it is not a finished run)
+    assert runner.list() == []
+
+
+@pytest.mark.asyncio
+async def test_pause_sets_status_paused_and_persists(tmp_path: Path) -> None:
+    # Given a runner with a slow running job we can pause mid-flight
+    runner = JobRunner(tmp_path)
+
+    def slow_run(report: Callable[[float, str], None]) -> None:
+        time.sleep(0.3)
+
+    job = await runner.submit("index", slow_run)
+    await asyncio.sleep(0.05)  # let the worker thread enter run_fn
+
+    # When pausing the job
+    runner.pause(job.id)
+
+    # Then the status is "paused" with finished_at stamped immediately
+    paused = runner.get(job.id)
+    assert paused.status == "paused"
+    assert paused.finished_at is not None
+
+    # And the paused status is persisted right away (pause persists synchronously)
+    payload = json.loads((tmp_path / "runs" / f"{job.id}.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "paused"
+
+    # And once the worker returns, the finalize path keeps it paused (not succeeded)
+    final = await _wait_for_terminal(runner, job.id, timeout_s=3.0)
+    assert final.status == "paused"
+    payload_after = json.loads((tmp_path / "runs" / f"{job.id}.json").read_text(encoding="utf-8"))
+    assert payload_after["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_report_stop_requested_is_false_then_true_after_pause(tmp_path: Path) -> None:
+    # Given a runner whose run_fn records report.stop_requested() before and after a pause
+    runner = JobRunner(tmp_path)
+    seen: dict[str, bool] = {}
+    started = threading.Event()
+    finished = threading.Event()
+
+    def run_fn(report: ProgressReporter) -> None:
+        try:
+            seen["before"] = report.stop_requested()
+            started.set()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if report.stop_requested():
+                    seen["after"] = True
+                    return
+                time.sleep(0.005)
+            seen["after"] = False
+        finally:
+            finished.set()
+
+    job = await runner.submit("kind-pause", run_fn)
+    assert started.wait(timeout=1.0), "run_fn did not start"
+
+    # Then the stop signal is unset while the job is running
+    assert seen["before"] is False
+
+    # When pausing
+    runner.pause(job.id)
+
+    # Then the stop signal becomes observable and the job ends paused
+    assert finished.wait(timeout=2.0), "run_fn did not observe the stop signal"
+    final = await _wait_for_terminal(runner, job.id, timeout_s=3.0)
+    assert final.status == "paused"
+    assert seen.get("after") is True
+
+
+@pytest.mark.asyncio
+async def test_report_stop_requested_is_true_after_cancel(tmp_path: Path) -> None:
+    # Given a runner whose run_fn polls report.stop_requested()
+    runner = JobRunner(tmp_path)
+    seen: dict[str, bool] = {}
+    started = threading.Event()
+    finished = threading.Event()
+
+    def run_fn(report: ProgressReporter) -> None:
+        try:
+            started.set()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if report.stop_requested():
+                    seen["after"] = True
+                    return
+                time.sleep(0.005)
+            seen["after"] = False
+        finally:
+            finished.set()
+
+    job = await runner.submit("kind-cancel", run_fn)
+    assert started.wait(timeout=1.0), "run_fn did not start"
+
+    # When cancelling (existing behavior)
+    runner.cancel(job.id)
+
+    # Then the stop signal is observed and the job stays cancelled
+    assert finished.wait(timeout=2.0), "run_fn did not observe the stop signal"
+    final = await _wait_for_terminal(runner, job.id, timeout_s=3.0)
+    assert final.status == "cancelled"
+    assert seen.get("after") is True
+
+
+@pytest.mark.asyncio
+async def test_run_fn_honoring_stop_requested_ends_paused_not_succeeded(tmp_path: Path) -> None:
+    # Given a run_fn that stops cooperatively once pause is requested, then
+    # tries one more report() (which must be a no-op after the stop).
+    runner = JobRunner(tmp_path)
+    started = threading.Event()
+    finished = threading.Event()
+
+    def run_fn(report: ProgressReporter) -> None:
+        report(0.1, "start")
+        started.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not report.stop_requested():
+            time.sleep(0.005)
+        report(0.5, "after-stop (should be ignored)")
+        finished.set()
+
+    job = await runner.submit("index", run_fn)
+    assert started.wait(timeout=1.0), "run_fn did not start"
+
+    # When pausing and letting run_fn return of its own accord
+    runner.pause(job.id)
+    assert finished.wait(timeout=2.0), "run_fn did not return after pause"
+
+    # Then finalize preserves "paused" (not succeeded, not cancelled) and the
+    # post-stop report was discarded.
+    final = await _wait_for_terminal(runner, job.id, timeout_s=3.0)
+    assert final.status == "paused"
+    assert final.status not in ("succeeded", "cancelled")
+    assert "after-stop (should be ignored)" not in final.log_lines

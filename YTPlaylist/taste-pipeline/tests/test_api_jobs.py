@@ -14,12 +14,14 @@ import pattern) so the duplicate-helper bloat does not return.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
 import uuid
 from typing import TYPE_CHECKING
 
+import pytest
 from fastapi.testclient import TestClient
 
 from conftest import (
@@ -30,7 +32,7 @@ from conftest import (
     _wait_for_terminal,
 )
 from taste_pipeline.web import create_app
-from taste_pipeline.web.jobs import JobRunner
+from taste_pipeline.web.jobs import JobRunner, ProgressReporter
 from taste_pipeline.web.routes_jobs import JOB_FACTORIES
 
 if TYPE_CHECKING:
@@ -156,6 +158,35 @@ def test_get_jobs_returns_list_newest_first(tmp_path: Path) -> None:
     assert len(payload) == 2
     assert payload[0]["id"] == str(job2.id)
     assert payload[1]["id"] == str(job1.id)
+
+
+def test_get_jobs_events_sse_progress_frame_carries_detail(tmp_path: Path) -> None:
+    # Given an app with a FakeJobRunner whose run_fn reports a structured detail payload
+    client, runner = _build_client_with_fake_runner(tmp_path)
+
+    def with_detail(report: ProgressReporter) -> None:
+        report(0.5, "indexed 1/3: b.flac", detail={"current": "b.flac", "processed": 1, "total": 3})
+        time.sleep(0.2)
+        report(1.0, "done")
+
+    job = _submit(runner, "index", with_detail)
+
+    # When opening the SSE stream
+    lines = _collect_sse_lines(client, f"/api/jobs/{job.id}/events")
+
+    # Then the progress frame carries the detail object so the Index page can
+    # render the current song + queue without a second request.
+    progress_lines = [ln for ln in lines if '"progress"' in ln]
+    assert progress_lines, f"no progress events in SSE stream: {lines!r}"
+    payloads = [json.loads(ln.removeprefix("data:")) for ln in progress_lines]
+    detail_payloads = [payload for payload in payloads if payload.get("detail")]
+    assert detail_payloads, f"no progress frame carried detail: {payloads!r}"
+    detail = detail_payloads[0]["detail"]
+    assert detail["current"] == "b.flac"
+    assert detail["processed"] == 1
+    assert detail["total"] == 3
+    # And the unnamed-frame protocol is preserved (no SSE `event:` line)
+    assert not any(ln.startswith("event:") for ln in lines), f"frames must stay unnamed: {lines!r}"
 
 
 def test_get_jobs_by_id_returns_single_job(tmp_path: Path) -> None:
@@ -416,3 +447,145 @@ def test_get_jobs_returns_check_url_job_with_result_field(
     assert final.result is not None, "result field must be populated after a successful check_url job"
     assert final.result["verdict"] == "matches"
     assert final.result["score"] == 0.82
+
+
+def _build_client_with_real_runner(tmp_path: Path) -> tuple[TestClient, JobRunner]:
+    """Construct an app whose app.state.runner is a real JobRunner (for pause/cancel)."""
+    cfg = _make_config(tmp_path)
+    app = create_app(cfg)
+    runner = JobRunner(cfg.data_dir)
+    app.state.runner = runner
+    return TestClient(app), runner
+
+
+def test_post_jobs_pause_returns_paused_status(tmp_path: Path) -> None:
+    # Given a real runner with a slow running job
+    client, runner = _build_client_with_real_runner(tmp_path)
+
+    def slow_run(report: Callable[[float, str], None]) -> None:
+        time.sleep(0.3)
+
+    job = asyncio.run(runner.submit("index", slow_run))
+    time.sleep(0.05)
+
+    # When POSTing to the pause endpoint
+    response = client.post(f"/api/jobs/{job.id}/pause")
+
+    # Then 200 + the job JSON reflects "paused"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == str(job.id)
+    assert payload["status"] == "paused"
+
+
+def test_post_jobs_pause_unknown_id_returns_404(tmp_path: Path) -> None:
+    # Given an app with a real runner
+    client, _runner = _build_client_with_real_runner(tmp_path)
+
+    # When pausing an unknown id
+    response = client.post(f"/api/jobs/{uuid.uuid4()}/pause")
+
+    # Then 404
+    assert response.status_code == 404
+
+
+def test_post_jobs_cancel_returns_cancelled_status(tmp_path: Path) -> None:
+    # Given a real runner with a slow running job
+    client, runner = _build_client_with_real_runner(tmp_path)
+
+    def slow_run(report: Callable[[float, str], None]) -> None:
+        time.sleep(0.3)
+
+    job = asyncio.run(runner.submit("index", slow_run))
+    time.sleep(0.05)
+
+    # When POSTing to the cancel endpoint
+    response = client.post(f"/api/jobs/{job.id}/cancel")
+
+    # Then 200 + the job JSON reflects "cancelled"
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+    # And an unknown id returns 404
+    assert client.post(f"/api/jobs/{uuid.uuid4()}/cancel").status_code == 404
+
+
+def test_post_jobs_index_batch_size_passed_to_factory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given an app with a FakeJobRunner and a spy make_index_factory
+    client, runner = _build_client_with_fake_runner(tmp_path)
+    recorded: dict[str, object] = {}
+
+    def sentinel(report: Callable[[float, str], None]) -> None:
+        report(1.0, "ok")
+
+    def fake_make_index_factory(config: object, *, batch_size: int | None = None) -> object:
+        recorded["batch_size"] = batch_size
+        return sentinel
+
+    monkeypatch.setattr(
+        "taste_pipeline.web.job_factories.make_index_factory",
+        fake_make_index_factory,
+    )
+
+    # When POSTing kind=index with batch_size=5
+    response = client.post("/api/jobs", json={"kind": "index", "batch_size": 5})
+
+    # Then the factory is constructed with batch_size=5 and submitted
+    assert response.status_code == 201
+    assert recorded["batch_size"] == 5
+    assert runner.submit_calls, "runner.submit must have been called"
+    submitted_kind, submitted_run_fn = runner.submit_calls[-1]
+    assert submitted_kind == "index"
+    assert submitted_run_fn is sentinel
+
+
+@pytest.mark.parametrize("bad_batch_size", [0, -1, "5", 1.5, True])
+def test_post_jobs_invalid_batch_size_returns_422(tmp_path: Path, bad_batch_size: object) -> None:
+    # Given an app with a FakeJobRunner
+    client, _runner = _build_client_with_fake_runner(tmp_path)
+
+    # When POSTing kind=index with an invalid batch_size
+    response = client.post("/api/jobs", json={"kind": "index", "batch_size": bad_batch_size})
+
+    # Then 422
+    assert response.status_code == 422
+
+
+def test_post_jobs_index_batch_size_reaches_scan_library(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given a real runner + a spy scan_library that records the batch/stop kwargs
+    client, runner = _build_client_with_real_runner(tmp_path)
+    captured: dict[str, object] = {}
+
+    class _CompleteIndex:
+        complete = True
+
+        def count(self) -> int:
+            return 0
+
+    def fake_scan_library(cfg: object, embedder: object, **kwargs: object) -> _CompleteIndex:
+        captured["should_stop"] = kwargs.get("should_stop")
+        captured["max_new_files"] = kwargs.get("max_new_files")
+        return _CompleteIndex()
+
+    monkeypatch.setattr("taste_pipeline.library.scan_library", fake_scan_library)
+
+    # When POSTing kind=index with batch_size=3
+    response = client.post("/api/jobs", json={"kind": "index", "batch_size": 3})
+    assert response.status_code == 201
+    job_id = uuid.UUID(response.json()["id"])
+
+    # Then the job runs to completion and scan_library received the cap + stop hook
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if runner.get(job_id).status in ("succeeded", "failed", "cancelled", "paused"):
+            break
+        time.sleep(0.01)
+    assert runner.get(job_id).status == "succeeded"
+    assert captured["max_new_files"] == 3
+    assert callable(captured["should_stop"])

@@ -199,31 +199,36 @@
 
       function attachJobStream(jobId) {
         var es = new EventSource('/api/jobs/' + jobId + '/events');
-        es.addEventListener('progress', function (evt) {
+        // The server frames are unnamed `data: {"event": ...}` payloads, so
+        // they all dispatch as the default `message` event; branch on the
+        // JSON `event` field rather than on named SSE event types.
+        es.onmessage = function (evt) {
+          var data;
           try {
-            var data = JSON.parse(evt.data);
+            data = JSON.parse(evt.data);
+          } catch (e) { /* malformed event payload: ignore */ return; }
+          if (data.event === 'progress') {
             setProgress(data.progress || 0, data.message || '');
-          } catch (e) { /* malformed event payload: ignore */ }
-        });
-        es.addEventListener('done', function () {
-          es.close();
-          // Fetch the final job to read .result.
-          fetch('/api/jobs/' + jobId).then(function (r) { return r.json(); }).then(function (job) {
-            if (job && job.result) {
-              showBadge('url-status', 'done', 'succeeded');
-              setVerdictBadge(job.result.verdict, job.result.score, job.result.human_readable, job.result.top_k);
-            } else if (job && job.status === 'failed') {
-              showBadge('url-status', 'failed: ' + (job.error || 'unknown'), 'failed');
+          } else if (data.event === 'done') {
+            es.close();
+            // Fetch the final job to read .result.
+            fetch('/api/jobs/' + jobId).then(function (r) { return r.json(); }).then(function (job) {
+              if (job && job.result) {
+                showBadge('url-status', 'done', 'succeeded');
+                setVerdictBadge(job.result.verdict, job.result.score, job.result.human_readable, job.result.top_k);
+              } else if (job && job.status === 'failed') {
+                showBadge('url-status', 'failed: ' + (job.error || 'unknown'), 'failed');
+                setVerdictBadge('error');
+              } else {
+                showBadge('url-status', 'finished with no result', 'failed');
+                setVerdictBadge('error');
+              }
+            }).catch(function (err) {
+              showBadge('url-status', 'failed: ' + err.message, 'failed');
               setVerdictBadge('error');
-            } else {
-              showBadge('url-status', 'finished with no result', 'failed');
-              setVerdictBadge('error');
-            }
-          }).catch(function (err) {
-            showBadge('url-status', 'failed: ' + err.message, 'failed');
-            setVerdictBadge('error');
-          });
-        });
+            });
+          }
+        };
       }
 
       if (checkBtn && urlInput) {
@@ -246,6 +251,52 @@
           });
         });
       }
+
+      // On load, reattach to the newest check_url job so navigating away and
+      // back restores the in-flight (or last) URL check -- progress, log and
+      // final result -- instead of re-rendering empty. Mirrors index.html's
+      // loadLatest(); the file-drop flow is untouched. The job payload exposes
+      // no source URL, so #url-input is deliberately left as-is.
+      var TERMINAL_STATUSES = { succeeded: true, failed: true, cancelled: true, paused: true };
+
+      function renderRestoredLog(lines) {
+        if (!logEl || !Array.isArray(lines) || lines.length === 0) return;
+        logEl.hidden = false;
+        logEl.innerHTML = '';
+        for (var i = 0; i < lines.length; i++) {
+          var line = document.createElement('div');
+          line.textContent = lines[i];
+          logEl.appendChild(line);
+        }
+      }
+
+      function restoreLatestCheck() {
+        fetch('/api/jobs').then(function (response) { return response.json(); }).then(function (jobs) {
+          if (!Array.isArray(jobs)) return;
+          var latest = null;
+          for (var i = 0; i < jobs.length; i++) {
+            if (jobs[i].kind === 'check_url') { latest = jobs[i]; break; }
+          }
+          if (!latest) return;
+          if (!TERMINAL_STATUSES[latest.status]) {
+            showBadge('url-status', 'running (' + latest.status + ')', 'running');
+            // The SSE stream replays every log line on connect, so seed only
+            // the bar here; pre-populating the log would duplicate lines.
+            setProgress(typeof latest.progress === 'number' ? latest.progress : 0, '');
+            attachJobStream(latest.id);
+          } else if (latest.status === 'succeeded' && latest.result) {
+            showBadge('url-status', 'done', 'succeeded');
+            setVerdictBadge(latest.result.verdict, latest.result.score, latest.result.human_readable, latest.result.top_k);
+            renderRestoredLog(latest.log_lines);
+          } else {
+            showBadge('url-status', 'failed: ' + (latest.error || 'unknown'), 'failed');
+            setVerdictBadge('error');
+            renderRestoredLog(latest.log_lines);
+          }
+        }).catch(function () { /* restore is best-effort */ });
+      }
+
+      restoreLatestCheck();
     })();
   </script>
 {% endblock %}

@@ -45,12 +45,13 @@ def test_minimal_config_loads_with_all_defaults(tmp_path: Path) -> None:
     cfg = load_config(config_path)
 
     # Then every default value is applied, paths are absolute, and the
-    # dataclass is the frozen+slooted one with all 16 fields.
+    # dataclass is the frozen+slots one with all 17 fields.
     assert isinstance(cfg, Config)
     assert cfg.like_library_dir == like_lib.resolve()
     assert cfg.data_dir == data_dir.resolve()
     assert cfg.cookie_file == cookie_file.resolve()
     assert cfg.download_archive == (data_dir / "yt-dlp-archive.txt").resolve()
+    assert cfg.proxy is None
     assert cfg.feed_window_days == 7
     assert cfg.max_feed_items == 500
     assert cfg.max_metadata_fetch == 150
@@ -60,6 +61,7 @@ def test_minimal_config_loads_with_all_defaults(tmp_path: Path) -> None:
     assert cfg.keep_threshold is None
     assert cfg.skip_threshold is None
     assert cfg.min_dislikes_for_classifier == 30
+    assert cfg.device == "auto"
     assert cfg.web_host == "127.0.0.1"
     assert cfg.web_port == 8741
 
@@ -96,6 +98,67 @@ def test_unknown_key_rejected(tmp_path: Path) -> None:
         load_config(config_path)
     assert "bogus_key" in str(exc_info.value)
     assert "unknown key" in str(exc_info.value)
+
+
+def test_model_local_dir_rejected_as_unknown_key(tmp_path: Path) -> None:
+    # Given a valid required trio plus a model_local_dir key -- the app bundles
+    # its CLAP weights and deliberately exposes no way to select another model,
+    # so any such key must be rejected rather than silently ignored.
+    like_lib = tmp_path / "lib"
+    like_lib.mkdir()
+    config_path = _write_config(
+        tmp_path,
+        _minimal_body(like_lib, tmp_path / "data", tmp_path / "cookies.txt")
+        + 'model_local_dir = "./somewhere"\n',
+    )
+
+    # When loading
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(config_path)
+    message = str(exc_info.value)
+
+    # Then a ConfigError names model_local_dir as an unknown key
+    assert "model_local_dir" in message
+    assert "unknown key" in message
+
+
+def test_model_name_rejected_as_unknown_key(tmp_path: Path) -> None:
+    # Given a valid required trio plus a model_name key (same no-option contract)
+    like_lib = tmp_path / "lib"
+    like_lib.mkdir()
+    config_path = _write_config(
+        tmp_path,
+        _minimal_body(like_lib, tmp_path / "data", tmp_path / "cookies.txt")
+        + 'model_name = "laion/larger_clap_music_and_speech"\n',
+    )
+
+    # When loading
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(config_path)
+    message = str(exc_info.value)
+
+    # Then a ConfigError names model_name as an unknown key
+    assert "model_name" in message
+    assert "unknown key" in message
+
+
+def test_invalid_device_value_rejected(tmp_path: Path) -> None:
+    # Given a config whose device is not one of auto/cpu/cuda/mps
+    like_lib = tmp_path / "lib"
+    like_lib.mkdir()
+    config_path = _write_config(
+        tmp_path,
+        _minimal_body(like_lib, tmp_path / "data", tmp_path / "cookies.txt") + 'device = "gpu"\n',
+    )
+
+    # When loading
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(config_path)
+    message = str(exc_info.value)
+
+    # Then a ConfigError names device and lists the allowed values
+    assert "device" in message
+    assert "auto, cpu, cuda, mps" in message
 
 
 def test_invalid_type_for_feed_window_days_rejected(tmp_path: Path) -> None:
@@ -316,3 +379,35 @@ def test_env_fallback_disabled_skips_env(tmp_path: Path, monkeypatch: pytest.Mon
     # Then ./config.toml is used (NOT the env var)
     assert cfg.data_dir == (tmp_path / "other").resolve()
     assert default_path.is_file()
+
+
+def test_proxy_override_is_loaded(tmp_path: Path) -> None:
+    # Given a config that routes yt-dlp through a proxy
+    like_lib = tmp_path / "lib"
+    like_lib.mkdir()
+    config_path = _write_config(
+        tmp_path,
+        _minimal_body(like_lib, tmp_path / "data", tmp_path / "cookies.txt")
+        + 'proxy = "http://127.0.0.1:56551"\n',
+    )
+
+    # When loading
+    cfg = load_config(config_path)
+
+    # Then the proxy string is preserved
+    assert cfg.proxy == "http://127.0.0.1:56551"
+
+
+def test_proxy_non_string_rejected(tmp_path: Path) -> None:
+    # Given a config whose proxy is not a string
+    like_lib = tmp_path / "lib"
+    like_lib.mkdir()
+    config_path = _write_config(
+        tmp_path,
+        _minimal_body(like_lib, tmp_path / "data", tmp_path / "cookies.txt") + "proxy = 123\n",
+    )
+
+    # When loading, Then a ConfigError names proxy
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(config_path)
+    assert "proxy" in str(exc_info.value)

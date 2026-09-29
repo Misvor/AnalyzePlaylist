@@ -93,6 +93,23 @@ def test_get_check_includes_required_event_source_handler_for_sse(tmp_path: Path
     assert "/api/check/file" in body, "check page must POST to /api/check/file"
 
 
+def test_get_check_sse_uses_onmessage_and_dispatches_on_json_event(tmp_path: Path) -> None:
+    # Given an app built from a valid config
+    client = _client(tmp_path)
+
+    # When GETting /check
+    response = client.get("/check")
+
+    # Then the SSE wiring uses EventSource.onmessage (the server sends unnamed
+    # `data: {"event": ...}` frames, so named addEventListener('progress'/'done')
+    # listeners would never fire) and branches on the JSON `event` field.
+    assert response.status_code == 200
+    body = response.text
+    assert "onmessage" in body, "check page does not assign es.onmessage; unnamed SSE frames never dispatch"
+    assert "data.event === 'progress'" in body, "check page onmessage does not handle the progress event"
+    assert "data.event === 'done'" in body, "check page onmessage does not handle the done event"
+
+
 def test_get_check_uses_base_template(tmp_path: Path) -> None:
     """The check page extends base.html; the nav ids from base must appear in the rendered output.
 
@@ -112,3 +129,30 @@ def test_get_check_uses_base_template(tmp_path: Path) -> None:
         assert f'id="{nav_id}"' in body, f"missing nav id {nav_id!r} in check page"
     # Status bar (rendered from base.html's env.globals)
     assert 'id="status-bar"' in body
+
+
+def test_get_check_restores_latest_check_url_job(tmp_path: Path) -> None:
+    """On load the page reattaches to the newest check_url job.
+
+    The URL check runs as a background job that can take minutes; if the
+    user navigates away and back, the page must restore the in-flight (or
+    last) check_url job rather than re-render empty. The restore path is
+    the same shape as index.html's ``loadLatest()``: list ``/api/jobs``,
+    pick the newest ``kind === 'check_url'`` job, and re-open the SSE
+    stream for a non-terminal one. This test locks that wiring plus the
+    unchanged ``onmessage`` + ``/events`` SSE contract.
+    """
+    client = _client(tmp_path)
+
+    response = client.get("/check")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "fetch('/api/jobs')" in body, "check page must list /api/jobs to find the latest job"
+    assert "kind === 'check_url'" in body, "restore path must filter to check_url jobs"
+    assert "attachJobStream(latest.id)" in body, (
+        "restore path must reattach the SSE stream for the latest job"
+    )
+    # The SSE contract itself is unchanged: unnamed frames + /events endpoint.
+    assert "onmessage" in body, "check page does not assign es.onmessage; unnamed SSE frames never dispatch"
+    assert "/events" in body, "check page must open the /api/jobs/{id}/events SSE endpoint"
