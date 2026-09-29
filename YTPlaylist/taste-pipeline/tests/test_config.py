@@ -51,7 +51,6 @@ def test_minimal_config_loads_with_all_defaults(tmp_path: Path) -> None:
     assert cfg.data_dir == data_dir.resolve()
     assert cfg.cookie_file == cookie_file.resolve()
     assert cfg.download_archive == (data_dir / "yt-dlp-archive.txt").resolve()
-    assert cfg.model_name == "laion/larger_clap_music_and_speech"
     assert cfg.feed_window_days == 7
     assert cfg.max_feed_items == 500
     assert cfg.max_metadata_fetch == 150

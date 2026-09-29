@@ -35,7 +35,7 @@ _FIELD_SPECS: Final[dict[str, tuple]] = {
     "data_dir": ("path_req",),
     "cookie_file": ("path_req",),
     "download_archive": ("path_opt",),
-    "model_name": ("str",),
+    "model_local_dir": ("path_opt",),
     "feed_window_days": ("int", 1),
     "max_feed_items": ("int", 1),
     "max_metadata_fetch": ("int", 1),
@@ -66,7 +66,7 @@ class Config:
     data_dir: Path
     cookie_file: Path
     download_archive: Path
-    model_name: str = "laion/larger_clap_music_and_speech"
+    model_local_dir: Path = Path("./models/clap")
     feed_window_days: int = 7
     max_feed_items: int = 500
     max_metadata_fetch: int = 150

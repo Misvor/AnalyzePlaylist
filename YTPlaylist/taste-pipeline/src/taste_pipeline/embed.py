@@ -41,32 +41,51 @@ class EmbeddingError(Exception):
         return f"failed to embed {self.path}: {self.detail}"
 
 
-def get_model(model_name: str) -> tuple[ClapModel, ClapProcessor]:
-    """Load (or return the cached) CLAP model and processor for ``model_name``.
+def get_model(model_path: str | Path) -> tuple[ClapModel, ClapProcessor]:
+    """Load (or return the cached) CLAP model and processor from a local weights directory.
 
     The model is loaded in float32 on CPU and put in eval mode; fp16/bf16 and
-    ``model.half()`` are deliberately avoided so embeddings stay deterministic and
-    comparable across runs. ``torch.manual_seed(0)`` is set at load time.
+    ``model.half()`` are deliberately avoided so embeddings stay deterministic
+    and comparable across runs. ``torch.manual_seed(0)`` is set at load time.
 
     Args:
-        model_name: Hugging Face model id (e.g. ``laion/larger_clap_music_and_speech``).
+        model_path: Local filesystem path to the CLAP weights directory. Must
+            contain ``pytorch_model.bin``, ``config.json``,
+            ``preprocessor_config.json``, and ``tokenizer_config.json``
+            (the standard ``transformers`` checkpoint layout, e.g. as
+            downloaded from ``huggingface.co/laion/larger_clap_music_and_speech``).
 
     Returns:
-        The cached ``(model, processor)`` pair for ``model_name``.
+        The cached ``(model, processor)`` pair for ``model_path``.
+
+    Raises:
+        FileNotFoundError: ``pytorch_model.bin`` is not present under
+            ``model_path``. Tells the user exactly what's missing so they
+            can re-download the weights.
     """
-    cached = _MODEL_CACHE.get(model_name)
+    resolved = Path(model_path).expanduser().resolve()
+    cache_key = str(resolved)
+    cached = _MODEL_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    if not (resolved / "pytorch_model.bin").is_file():
+        raise FileNotFoundError(
+            f"CLAP weights not found at {resolved}: "
+            "missing pytorch_model.bin. Place the four required files "
+            "(pytorch_model.bin, config.json, preprocessor_config.json, "
+            "tokenizer_config.json) under that directory, or set "
+            "model_local_dir in config.toml to a populated weights dir."
+        )
     import torch  # noqa: PLC0415  # lazy by design: keep torch/transformers out of module import
     from transformers import ClapModel, ClapProcessor  # noqa: PLC0415
 
     _ = torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]  # torch stub gap
     model = ClapModel.from_pretrained(  # pyright: ignore[reportUnknownMemberType]  # transformers stub gap
-        model_name, torch_dtype=torch.float32
+        resolved, torch_dtype=torch.float32
     ).eval()
-    processor = ClapProcessor.from_pretrained(model_name)  # pyright: ignore[reportUnknownMemberType]  # stub gap
+    processor = ClapProcessor.from_pretrained(resolved)  # pyright: ignore[reportUnknownMemberType]  # stub gap
     pair = (model, processor)
-    _MODEL_CACHE[model_name] = pair
+    _MODEL_CACHE[cache_key] = pair
     return pair
 
 
@@ -127,7 +146,7 @@ def embed_track(audio_path: Path, config: Config) -> npt.NDArray[np.float32]:
             contains NaN/Inf, has a zero norm, or has the wrong shape.
         DecodeError: The file cannot be decoded into PCM samples.
     """
-    model, processor = get_model(config.model_name)
+    model, processor = get_model(config.model_local_dir)
     samples = decode_audio(audio_path, config.sample_rate)
     chunks = chunk_audio(samples, config.sample_rate, config.chunk_seconds, config.min_chunk_seconds)
     if not chunks:

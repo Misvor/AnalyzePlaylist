@@ -18,6 +18,9 @@ var/
 data/
 runs/
 
+# Local CLAP weights (~1.8 GB) — populated once by the user, never committed.
+models/
+
 # Placeholders shipped with config.example.toml (smoke-test fixtures,
 # never commit; users replace these paths in their real config.toml).
 example_like_library/

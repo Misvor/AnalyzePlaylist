@@ -23,7 +23,7 @@ pytestmark = [
 
 SAMPLE_RATE: int = 48000
 EMBEDDING_DIM: int = 512
-MODEL_NAME: str = "laion/larger_clap_music_and_speech"
+MODEL_LOCAL_DIR: Path = Path("./models/clap")
 
 
 def _write_sine_wav(path: Path, *, frequency: float, seconds: float) -> None:
@@ -39,11 +39,11 @@ def _write_sine_wav(path: Path, *, frequency: float, seconds: float) -> None:
 
 @pytest.fixture(scope="module")
 def clap_model() -> object:
-    """Load the real CLAP model once per module; skip cleanly when it cannot be downloaded."""
+    """Load the real CLAP model once per module; skip cleanly when the local weights are missing."""
     try:
-        return get_model(MODEL_NAME)
-    except Exception as exc:  # noqa: BLE001  # any HF/network failure means "model unavailable"
-        pytest.skip(f"CLAP model {MODEL_NAME} unavailable: {exc}")
+        return get_model(MODEL_LOCAL_DIR)
+    except Exception as exc:  # noqa: BLE001  # any load failure (missing weights, file error) means "model unavailable"
+        pytest.skip(f"CLAP weights unavailable at {MODEL_LOCAL_DIR}: {exc}")
 
 
 @pytest.fixture

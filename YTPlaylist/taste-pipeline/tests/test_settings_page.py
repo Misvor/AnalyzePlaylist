@@ -287,7 +287,6 @@ EXPECTED_EDITABLE_FIELDS = frozenset(
         "chunk_seconds",
         "min_chunk_seconds",
         "sample_rate",
-        "model_name",
         "like_library_dir",
         "data_dir",
         "cookie_file",
@@ -663,7 +662,6 @@ def test_post_config_preserves_unmentioned_fields_on_disk(tmp_path: Path) -> Non
     assert reloaded.keep_threshold == 0.7
     assert reloaded.feed_window_days == original.feed_window_days
     assert reloaded.web_port == original.web_port
-    assert reloaded.model_name == original.model_name
 
 
 def test_post_config_rejects_unknown_field(tmp_path: Path) -> None:
